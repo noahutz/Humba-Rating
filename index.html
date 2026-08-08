@@ -353,8 +353,9 @@ input:focus, select:focus{
 .serve-slot-note{
   font-family: 'DM Mono', monospace;
   font-size: 10px;
+  line-height: 13px;
   color: var(--muted);
-  min-height: 14px;
+  min-height: 26px; /* reserves 2 lines so wrapping on the serving side never shifts the score below it */
   margin-top: 2px;
 }
 .score-tap-btn{
@@ -928,7 +929,6 @@ function renderLiveNowCard(){
   if(!liveViewerData) return '';
   const lv = liveViewerData;
   const typeLabel = lv.type === 'singles' ? 'Singles' : lv.type === 'mixed' ? 'Mixed doubles' : 'Doubles';
-  const secondsAgo = liveViewerFetchedAt ? Math.max(0, Math.round((Date.now() - liveViewerFetchedAt) / 1000)) : null;
   const servingScore = lv.serving === 'A' ? lv.scoreA : lv.scoreB;
   const courtLabel = `${serveCourtSide(servingScore)} court`;
   return `
@@ -936,7 +936,6 @@ function renderLiveNowCard(){
       <div class="live-now-header">
         <span class="live-pulse-dot"></span>
         <span class="live-now-label">Live · ${typeLabel} to ${lv.target}</span>
-        ${secondsAgo !== null ? `<span class="live-now-meta">updated ${secondsAgo}s ago</span>` : ''}
       </div>
       <div class="scoreboard" style="margin-top:12px; margin-bottom:0;">
         <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
@@ -1452,7 +1451,9 @@ function renderLiveBoard(){
   const isDoublesFormat = live.type !== 'singles';
   const servingScore = live.serving === 'A' ? live.scoreA : live.scoreB;
   const sideLabel = `${serveCourtSide(servingScore)} court`;
-  const serverSlotText = `${isDoublesFormat ? (live.serverSlot===1?'1st':'2nd')+' server · ' : ''}${sideLabel}`;
+  const serverSlotText = isDoublesFormat
+    ? `${live.serverSlot===1?'1st':'2nd'} server<br>${sideLabel}`
+    : sideLabel;
   const plainNamesA = live.teamA.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
   const plainNamesB = live.teamB.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
 
