@@ -407,9 +407,10 @@ let editingMatchId = null; // id of match currently being score-edited in Histor
 // Next-games generator state (in-memory only, resets on reload — scoped to "today")
 let sessionPresentIds = new Set();
 let sessionCourts = null;
+let sessionGameCount = null;   // how many rounds/games to generate in one batch
 let sessionAppearances = {};   // playerId -> times assigned to a court this session
 let sessionRoundsHistory = []; // array of generated rounds (for repeat-avoidance)
-let currentRound = null;       // the most recently generated round
+let currentSchedule = null;    // array of generated rounds: [{courts, sittingOut}, ...]
 let selA = [null, null];
 let selB = [null, null];
 
@@ -764,16 +765,13 @@ function buildHistoryCounts(){
   return { partner, opponent };
 }
 
-function generateRound(){
+function buildOneRound(){
   const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
   const men = presentPlayers.filter(p => p.gender === 'M');
   const women = presentPlayers.filter(p => p.gender === 'F');
   const maxCourtsByGender = Math.min(Math.floor(men.length / 2), Math.floor(women.length / 2));
   const courts = Math.max(0, Math.min(sessionCourts || 1, maxCourtsByGender));
-  if(courts < 1){
-    showToast('Need at least 2 men and 2 ladies checked in');
-    return;
-  }
+  if(courts < 1) return null;
 
   const neededEach = courts * 2;
   const sortByAppearance = arr => [...arr].sort((a, b) =>
@@ -826,8 +824,47 @@ function generateRound(){
     c.ratingDiff = Math.abs(rA - rB);
   });
 
-  currentRound = { courts: best, sittingOut: benched.map(p => p.id) };
-  sessionRoundsHistory.push(currentRound);
+  const round = { courts: best, sittingOut: benched.map(p => p.id) };
+  sessionRoundsHistory.push(round); // feeds repeat-avoidance for the next round in this batch
+  return round;
+}
+
+// Undoes the appearance counts and pairing-history entries from a schedule
+// that was generated but never actually played (i.e. replaced by a
+// regenerate) — so discarded proposals don't bias future fairness/variety.
+function rollbackSchedule(schedule){
+  schedule.forEach(round => {
+    round.courts.forEach(c => {
+      [c.teamA.M, c.teamA.F, c.teamB.M, c.teamB.F].forEach(id => {
+        if(sessionAppearances[id]) sessionAppearances[id]--;
+      });
+    });
+    const idx = sessionRoundsHistory.indexOf(round);
+    if(idx !== -1) sessionRoundsHistory.splice(idx, 1);
+  });
+}
+
+function generateSchedule(){
+  const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
+  const men = presentPlayers.filter(p => p.gender === 'M');
+  const women = presentPlayers.filter(p => p.gender === 'F');
+  if(Math.min(men.length, women.length) < 2){
+    showToast('Need at least 2 men and 2 ladies checked in');
+    return;
+  }
+  if(currentSchedule) rollbackSchedule(currentSchedule); // clean slate before reshuffling
+  const count = Math.max(1, sessionGameCount || 1);
+  const schedule = [];
+  for(let i = 0; i < count; i++){
+    const round = buildOneRound();
+    if(!round) break;
+    schedule.push(round);
+  }
+  if(schedule.length === 0){
+    showToast('Need at least 2 men and 2 ladies checked in');
+    return;
+  }
+  currentSchedule = schedule;
   render();
 }
 
@@ -839,6 +876,7 @@ function renderNextGames(){
   const women = state.players.filter(p => p.gender === 'F' && sessionPresentIds.has(p.id));
   const maxCourts = Math.max(1, Math.min(Math.floor(men.length / 2), Math.floor(women.length / 2)) || 1);
   if(sessionCourts === null) sessionCourts = maxCourts;
+  if(sessionGameCount === null) sessionGameCount = sessionCourts <= 1 ? 8 : 3;
 
   const checklist = state.players.map(p => `
     <label class="checkbox-row">
@@ -849,21 +887,21 @@ function renderNextGames(){
 
   const qualityLabel = d => d < 0.15 ? 'Even match' : d < 0.4 ? 'Close' : 'Uneven';
 
-  const courtsHtml = currentRound ? currentRound.courts.map((c, i) => `
-    <div class="court-card">
-      <div class="court-title"><span>Court ${i+1}</span><span class="quality">${qualityLabel(c.ratingDiff)}</span></div>
-      <div class="court-match">
-        <div class="court-side">${escapeHtml(playerById(c.teamA.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamA.F)?.name || '—')}</div>
-        <div class="court-vs">VS</div>
-        <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamB.F)?.name || '—')}</div>
+  const scheduleHtml = currentSchedule ? currentSchedule.map((round, ri) => `
+    <div class="section-title">${sessionCourts <= 1 ? `Game ${ri+1}` : `Round ${ri+1}`}</div>
+    ${round.courts.map((c, ci) => `
+      <div class="court-card">
+        <div class="court-title"><span>${sessionCourts <= 1 ? 'Court' : `Court ${ci+1}`}</span><span class="quality">${qualityLabel(c.ratingDiff)}</span></div>
+        <div class="court-match">
+          <div class="court-side">${escapeHtml(playerById(c.teamA.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamA.F)?.name || '—')}</div>
+          <div class="court-vs">VS</div>
+          <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamB.F)?.name || '—')}</div>
+        </div>
+        <button class="btn btn-ghost small-btn" data-log-round="${ri}" data-log-court="${ci}">Log score</button>
       </div>
-      <button class="btn btn-ghost small-btn" data-log-court="${i}">Log score</button>
-    </div>
+    `).join('')}
+    ${round.sittingOut.length ? `<div class="sitting-out">Sitting out: ${round.sittingOut.map(id => escapeHtml(playerById(id)?.name || '')).join(', ')}</div>` : ''}
   `).join('') : '';
-
-  const sittingOutHtml = (currentRound && currentRound.sittingOut.length) ? `
-    <div class="sitting-out">Sitting out: ${currentRound.sittingOut.map(id => escapeHtml(playerById(id)?.name || '')).join(', ')}</div>
-  ` : '';
 
   return `
     <div class="section-title">Who's here today?</div>
@@ -872,10 +910,14 @@ function renderNextGames(){
       <label>Courts available</label>
       <input type="number" id="courtsInput" min="1" max="${maxCourts}" value="${sessionCourts}">
     </div>
-    <button class="btn btn-primary" id="generateBtn">${currentRound ? 'Regenerate matchups' : 'Generate matchups'}</button>
-    ${currentRound ? `<button class="btn btn-ghost" id="resetRotationBtn">Reset rotation</button>` : ''}
+    <div class="field">
+      <label>Games to generate</label>
+      <input type="number" id="gameCountInput" min="1" max="30" value="${sessionGameCount}">
+    </div>
+    <button class="btn btn-primary" id="generateBtn">${currentSchedule ? 'Regenerate matchups' : 'Generate matchups'}</button>
+    ${currentSchedule ? `<button class="btn btn-ghost" id="resetRotationBtn">Reset rotation</button>` : ''}
     <div style="height:22px"></div>
-    ${courtsHtml ? `<div class="section-title">This round</div>${courtsHtml}${sittingOutHtml}` : ''}
+    ${scheduleHtml}
   `;
 }
 
@@ -1120,15 +1162,20 @@ function bindMainEvents(){
     courtsInput.oninput = () => { sessionCourts = Math.max(1, parseInt(courtsInput.value, 10) || 1); };
   }
 
+  const gameCountInput = $('#gameCountInput');
+  if(gameCountInput){
+    gameCountInput.oninput = () => { sessionGameCount = Math.max(1, parseInt(gameCountInput.value, 10) || 1); };
+  }
+
   const generateBtn = $('#generateBtn');
-  if(generateBtn) generateBtn.onclick = generateRound;
+  if(generateBtn) generateBtn.onclick = generateSchedule;
 
   const resetRotationBtn = $('#resetRotationBtn');
   if(resetRotationBtn){
     resetRotationBtn.onclick = () => {
       sessionAppearances = {};
       sessionRoundsHistory = [];
-      currentRound = null;
+      currentSchedule = null;
       showToast('Rotation reset');
       render();
     };
@@ -1136,7 +1183,8 @@ function bindMainEvents(){
 
   document.querySelectorAll('[data-log-court]').forEach(btn => {
     btn.onclick = () => {
-      const court = currentRound.courts[parseInt(btn.dataset.logCourt, 10)];
+      const round = currentSchedule[parseInt(btn.dataset.logRound, 10)];
+      const court = round.courts[parseInt(btn.dataset.logCourt, 10)];
       matchPrefill = { teamA: court.teamA, teamB: court.teamB };
       matchTeamSize = 'mixed';
       view = 'addMatch';
