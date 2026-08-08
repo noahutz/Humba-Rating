@@ -416,6 +416,22 @@ input:focus, select:focus{
   color: var(--muted);
   margin-left: auto;
 }
+.live-now-clickable{
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.live-now-clickable:active{
+  transform: scale(0.985);
+}
+.live-now-manage{
+  text-align: center;
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ball);
+  font-weight: 700;
+  margin-top: 12px;
+}
 
 /* History */
 .match-card{
@@ -550,7 +566,7 @@ let liveViewerFetchedAt = null;
 let liveViewerPoll = null;
 
 function rowToLiveMatch(r){
-  return { type: r.type, teamA: r.team_a, teamB: r.team_b, scoreA: r.score_a, scoreB: r.score_b, target: r.target, serving: r.serving, serverPlayerId: r.server_player_id };
+  return { type: r.type, teamA: r.team_a, teamB: r.team_b, scoreA: r.score_a, scoreB: r.score_b, target: r.target, serving: r.serving, serverPlayerId: r.server_player_id, serverSlot: r.server_slot };
 }
 
 async function fetchLiveViewerData(){
@@ -582,11 +598,29 @@ function syncLiveMatch(){
   supaUpsert('live_matches', [{
     id: 'current', type: live.type, team_a: live.teamA, team_b: live.teamB,
     score_a: live.scoreA, score_b: live.scoreB, target: live.target, serving: live.serving,
-    server_player_id: serverPlayerId
+    server_player_id: serverPlayerId, server_slot: live.serverSlot
   }]).catch(() => {});
 }
 function clearLiveMatchRemote(){
   supaDelete('live_matches', 'current').catch(() => {});
+}
+
+// Lets admin resume control of a live match that's already running remotely
+// but isn't loaded in this tab's local state (e.g. after a page reload).
+function resumeLiveFromRemote(lv){
+  const servingArr = lv.serving === 'A' ? lv.teamA : lv.teamB;
+  const idx = servingArr.indexOf(lv.serverPlayerId);
+  live.type = lv.type;
+  live.teamA = lv.teamA;
+  live.teamB = lv.teamB;
+  live.scoreA = lv.scoreA;
+  live.scoreB = lv.scoreB;
+  live.target = lv.target;
+  live.serving = lv.serving;
+  live.serverPlayerIndex = idx >= 0 ? idx : 0;
+  live.serverSlot = lv.serverSlot || 1;
+  live.history = []; // undo history isn't synced remotely, so it can't be restored
+  live.started = true;
 }
 
 // Jumps straight into live scoring for a court proposed by the Next Games
@@ -896,9 +930,9 @@ function renderLiveNowCard(){
   const typeLabel = lv.type === 'singles' ? 'Singles' : lv.type === 'mixed' ? 'Mixed doubles' : 'Doubles';
   const secondsAgo = liveViewerFetchedAt ? Math.max(0, Math.round((Date.now() - liveViewerFetchedAt) / 1000)) : null;
   const servingScore = lv.serving === 'A' ? lv.scoreA : lv.scoreB;
-  const sideNote = `<div class="serve-slot-note">${serveCourtSide(servingScore)} court</div>`;
+  const courtLabel = `${serveCourtSide(servingScore)} court`;
   return `
-    <div class="live-now-banner">
+    <div class="live-now-banner${isAdmin ? ' live-now-clickable' : ''}" ${isAdmin ? 'id="liveNowCard"' : ''}>
       <div class="live-now-header">
         <span class="live-pulse-dot"></span>
         <span class="live-now-label">Live · ${typeLabel} to ${lv.target}</span>
@@ -907,15 +941,16 @@ function renderLiveNowCard(){
       <div class="scoreboard" style="margin-top:12px; margin-bottom:0;">
         <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
           <div class="score-name">${formatSideNames(lv.teamA, lv.serving==='A', lv.serverPlayerId)}</div>
-          ${lv.serving==='A' ? sideNote : ''}
+          <div class="serve-slot-note">${lv.serving==='A' ? courtLabel : '\u00A0'}</div>
           <div class="score-value" style="font-size:40px; margin:6px 0 0;">${lv.scoreA}</div>
         </div>
         <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
           <div class="score-name">${formatSideNames(lv.teamB, lv.serving==='B', lv.serverPlayerId)}</div>
-          ${lv.serving==='B' ? sideNote : ''}
+          <div class="serve-slot-note">${lv.serving==='B' ? courtLabel : '\u00A0'}</div>
           <div class="score-value" style="font-size:40px; margin:6px 0 0;">${lv.scoreB}</div>
         </div>
       </div>
+      ${isAdmin ? `<div class="live-now-manage">Tap to manage →</div>` : ''}
     </div>
   `;
 }
@@ -1417,7 +1452,7 @@ function renderLiveBoard(){
   const isDoublesFormat = live.type !== 'singles';
   const servingScore = live.serving === 'A' ? live.scoreA : live.scoreB;
   const sideLabel = `${serveCourtSide(servingScore)} court`;
-  const serverSlotNote = `<div class="serve-slot-note">${isDoublesFormat ? (live.serverSlot===1?'1st':'2nd')+' server · ' : ''}${sideLabel}</div>`;
+  const serverSlotText = `${isDoublesFormat ? (live.serverSlot===1?'1st':'2nd')+' server · ' : ''}${sideLabel}`;
   const plainNamesA = live.teamA.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
   const plainNamesB = live.teamB.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
 
@@ -1426,13 +1461,13 @@ function renderLiveBoard(){
     <div class="scoreboard">
       <div class="score-side">
         <div class="score-name">${formatSideNames(live.teamA, live.serving==='A', servingPlayerId)}</div>
-        ${live.serving==='A' ? serverSlotNote : ''}
+        <div class="serve-slot-note">${live.serving==='A' ? serverSlotText : '\u00A0'}</div>
         <div class="score-value">${live.scoreA}</div>
         <button class="score-tap-btn" id="tapA" ${winner ? 'disabled' : ''}>Team A point</button>
       </div>
       <div class="score-side">
         <div class="score-name">${formatSideNames(live.teamB, live.serving==='B', servingPlayerId)}</div>
-        ${live.serving==='B' ? serverSlotNote : ''}
+        <div class="serve-slot-note">${live.serving==='B' ? serverSlotText : '\u00A0'}</div>
         <div class="score-value">${live.scoreB}</div>
         <button class="score-tap-btn" id="tapB" ${winner ? 'disabled' : ''}>Team B point</button>
       </div>
@@ -1703,6 +1738,17 @@ function bindMainEvents(){
       } else {
         showToast('Incorrect password');
       }
+    };
+  }
+
+  const liveNowCard = $('#liveNowCard');
+  if(liveNowCard){
+    liveNowCard.onclick = () => {
+      if(!live.started && liveViewerData){
+        resumeLiveFromRemote(liveViewerData); // e.g. after a page reload
+      }
+      view = 'liveScore';
+      render();
     };
   }
 
