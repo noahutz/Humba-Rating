@@ -351,12 +351,19 @@ input:focus, select:focus{
   line-height: 1;
 }
 .serve-slot-note{
-  font-family: 'DM Mono', monospace;
-  font-size: 10px;
-  line-height: 13px;
-  color: var(--muted);
-  min-height: 26px; /* reserves 2 lines so wrapping on the serving side never shifts the score below it */
-  margin-top: 2px;
+  min-height: 14px;
+  margin-top: 4px;
+}
+.ball-icon-row{
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+}
+.ball-icon{
+  width: 9px; height: 9px;
+  border-radius: 100px;
+  background: var(--ball);
+  display: inline-block;
 }
 .score-tap-btn{
   width: 100%;
@@ -536,17 +543,14 @@ function resetLive(){
 
 // Formats a team's player names for display, prefixing a serve-dot next to
 // whichever player is currently serving (only meaningful for the serving team).
-function formatSideNames(teamIds, isServingTeam, servingPlayerId){
-  return teamIds.map(id => {
-    const name = escapeHtml(playerById(id)?.name || '—');
-    return (isServingTeam && id === servingPlayerId) ? `<span class="serve-dot"></span>${name}` : name;
-  }).join(' &amp; ');
+function formatSideNames(teamIds){
+  return teamIds.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
 }
 
-// Court side is derived, not tracked — the serving team's own score parity
-// determines it (even = right court, odd = left), regardless of who's serving.
-function serveCourtSide(servingScore){
-  return servingScore % 2 === 0 ? 'Right' : 'Left';
+// One ball icon for the 1st server, two for the 2nd server.
+function renderBallIcons(serverSlot){
+  const count = serverSlot === 2 ? 2 : 1;
+  return `<div class="ball-icon-row">${'<span class="ball-icon"></span>'.repeat(count)}</div>`;
 }
 
 // Admin flag — gated by a shared password, stored locally once entered
@@ -929,8 +933,8 @@ function renderLiveNowCard(){
   if(!liveViewerData) return '';
   const lv = liveViewerData;
   const typeLabel = lv.type === 'singles' ? 'Singles' : lv.type === 'mixed' ? 'Mixed doubles' : 'Doubles';
-  const servingScore = lv.serving === 'A' ? lv.scoreA : lv.scoreB;
-  const courtLabel = `${serveCourtSide(servingScore)} court`;
+  const isDoublesFormat = lv.type !== 'singles';
+  const ballIcons = isDoublesFormat ? renderBallIcons(lv.serverSlot) : '';
   return `
     <div class="live-now-banner${isAdmin ? ' live-now-clickable' : ''}" ${isAdmin ? 'id="liveNowCard"' : ''}>
       <div class="live-now-header">
@@ -939,13 +943,13 @@ function renderLiveNowCard(){
       </div>
       <div class="scoreboard" style="margin-top:12px; margin-bottom:0;">
         <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
-          <div class="score-name">${formatSideNames(lv.teamA, lv.serving==='A', lv.serverPlayerId)}</div>
-          <div class="serve-slot-note">${lv.serving==='A' ? courtLabel : '\u00A0'}</div>
+          <div class="score-name">${formatSideNames(lv.teamA)}</div>
+          <div class="serve-slot-note">${lv.serving==='A' ? ballIcons : ''}</div>
           <div class="score-value" style="font-size:40px; margin:6px 0 0;">${lv.scoreA}</div>
         </div>
         <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
-          <div class="score-name">${formatSideNames(lv.teamB, lv.serving==='B', lv.serverPlayerId)}</div>
-          <div class="serve-slot-note">${lv.serving==='B' ? courtLabel : '\u00A0'}</div>
+          <div class="score-name">${formatSideNames(lv.teamB)}</div>
+          <div class="serve-slot-note">${lv.serving==='B' ? ballIcons : ''}</div>
           <div class="score-value" style="font-size:40px; margin:6px 0 0;">${lv.scoreB}</div>
         </div>
       </div>
@@ -1446,14 +1450,8 @@ function renderLiveSetup(){
 
 function renderLiveBoard(){
   const winner = computeLiveWinner();
-  const servingTeamArr = live.serving === 'A' ? live.teamA : live.teamB;
-  const servingPlayerId = servingTeamArr[live.serverPlayerIndex] ?? servingTeamArr[0];
   const isDoublesFormat = live.type !== 'singles';
-  const servingScore = live.serving === 'A' ? live.scoreA : live.scoreB;
-  const sideLabel = `${serveCourtSide(servingScore)} court`;
-  const serverSlotText = isDoublesFormat
-    ? `${live.serverSlot===1?'1st':'2nd'} server<br>${sideLabel}`
-    : sideLabel;
+  const ballIcons = isDoublesFormat ? renderBallIcons(live.serverSlot) : '';
   const plainNamesA = live.teamA.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
   const plainNamesB = live.teamB.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
 
@@ -1461,14 +1459,14 @@ function renderLiveBoard(){
     <div class="section-title">Live · playing to ${live.target}</div>
     <div class="scoreboard">
       <div class="score-side">
-        <div class="score-name">${formatSideNames(live.teamA, live.serving==='A', servingPlayerId)}</div>
-        <div class="serve-slot-note">${live.serving==='A' ? serverSlotText : '\u00A0'}</div>
+        <div class="score-name">${formatSideNames(live.teamA)}</div>
+        <div class="serve-slot-note">${live.serving==='A' ? ballIcons : ''}</div>
         <div class="score-value">${live.scoreA}</div>
         <button class="score-tap-btn" id="tapA" ${winner ? 'disabled' : ''}>Team A point</button>
       </div>
       <div class="score-side">
-        <div class="score-name">${formatSideNames(live.teamB, live.serving==='B', servingPlayerId)}</div>
-        <div class="serve-slot-note">${live.serving==='B' ? serverSlotText : '\u00A0'}</div>
+        <div class="score-name">${formatSideNames(live.teamB)}</div>
+        <div class="serve-slot-note">${live.serving==='B' ? ballIcons : ''}</div>
         <div class="score-value">${live.scoreB}</div>
         <button class="score-tap-btn" id="tapB" ${winner ? 'disabled' : ''}>Team B point</button>
       </div>
