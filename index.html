@@ -401,11 +401,12 @@ let view = 'leaderboard';
 let leaderboardMode = 'doubles'; // 'doubles' | 'singles' — DUPR tracks these separately
 let matchTeamSize = 'mixed'; // 'singles' | 'doubles' | 'mixed'
 let newPlayerGender = 'F';
-let matchPrefill = null; // {teamA:{M,F}, teamB:{M,F}} for mixed pre-fill from generator
+let matchPrefill = null; // {type:'mixed', teamA:{M,F}, teamB:{M,F}} or {type:'singles', teamA:[id], teamB:[id]} — pre-fill from generator
 let editingMatchId = null; // id of match currently being score-edited in History tab
 
 // Next-games generator state (in-memory only, resets on reload — scoped to "today")
 let sessionPresentIds = new Set();
+let sessionGenMode = 'mixed';  // 'mixed' | 'singles'
 let sessionCourts = null;
 let sessionGameCount = null;   // how many rounds/games to generate in one batch
 let sessionAppearances = {};   // playerId -> times assigned to a court this session
@@ -648,6 +649,23 @@ async function removePlayer(id){
   render();
 }
 
+async function deleteMatch(id){
+  const m = state.matches.find(mm => mm.id === id);
+  if(!m) return;
+  if(!confirm('Delete this match? Ratings will be recalculated without it.')) return;
+  state.matches = state.matches.filter(mm => mm.id !== id);
+  recomputeRatings();
+  try{
+    await supaDelete('matches', id);
+  }catch(e){
+    showToast("Couldn't reach the database — try again");
+    return;
+  }
+  await saveData();
+  showToast('Match deleted');
+  render();
+}
+
 /* ---------- Tabs ---------- */
 function renderTabs(){
   const tabs = [
@@ -672,7 +690,12 @@ function renderLeaderboard(){
   }
   const field = ratingField(leaderboardMode);
   const mField = matchesField(leaderboardMode);
-  const sorted = [...state.players].sort((a,b)=> b[field] - a[field]);
+  const sorted = [...state.players].sort((a, b) => {
+    const aRated = a[mField] > 0, bRated = b[mField] > 0;
+    if(aRated !== bRated) return aRated ? -1 : 1; // rated players before NR
+    if(!aRated) return a.name.localeCompare(b.name); // both NR — alphabetical
+    return b[field] - a[field]; // both rated — highest first
+  });
   return `
     <div class="team-toggle" id="leaderboardModeToggle">
       <button data-mode="doubles" class="${leaderboardMode==='doubles'?'active':''}">Doubles</button>
@@ -757,15 +780,23 @@ function buildHistoryCounts(){
   });
   sessionRoundsHistory.forEach(r => {
     r.courts.forEach(c => {
-      addPartner(c.teamA.M, c.teamA.F);
-      addPartner(c.teamB.M, c.teamB.F);
-      [c.teamA.M, c.teamA.F].forEach(a => [c.teamB.M, c.teamB.F].forEach(b => addOpponent(a, b)));
+      if(r.mode === 'singles'){
+        addOpponent(c.teamA[0], c.teamB[0]);
+      } else {
+        addPartner(c.teamA.M, c.teamA.F);
+        addPartner(c.teamB.M, c.teamB.F);
+        [c.teamA.M, c.teamA.F].forEach(a => [c.teamB.M, c.teamB.F].forEach(b => addOpponent(a, b)));
+      }
     });
   });
   return { partner, opponent };
 }
 
 function buildOneRound(){
+  return sessionGenMode === 'singles' ? buildOneSinglesRound() : buildOneMixedRound();
+}
+
+function buildOneMixedRound(){
   const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
   const men = presentPlayers.filter(p => p.gender === 'M');
   const women = presentPlayers.filter(p => p.gender === 'F');
@@ -824,8 +855,60 @@ function buildOneRound(){
     c.ratingDiff = Math.abs(rA - rB);
   });
 
-  const round = { courts: best, sittingOut: benched.map(p => p.id) };
+  const round = { mode: 'mixed', courts: best, sittingOut: benched.map(p => p.id) };
   sessionRoundsHistory.push(round); // feeds repeat-avoidance for the next round in this batch
+  return round;
+}
+
+function buildOneSinglesRound(){
+  const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
+  const maxCourtsByCount = Math.floor(presentPlayers.length / 2);
+  const courts = Math.max(0, Math.min(sessionCourts || 1, maxCourtsByCount));
+  if(courts < 1) return null;
+
+  const neededEach = courts * 2;
+  const sortByAppearance = arr => [...arr].sort((a, b) =>
+    (sessionAppearances[a.id] || 0) - (sessionAppearances[b.id] || 0) || Math.random() - 0.5
+  );
+  const playing = sortByAppearance(presentPlayers).slice(0, neededEach);
+  const playingIds = new Set(playing.map(p => p.id));
+  const benched = presentPlayers.filter(p => !playingIds.has(p.id));
+
+  const { opponent } = buildHistoryCounts();
+
+  function scoreAssignment(courtsArr){
+    let score = 0;
+    courtsArr.forEach(c => {
+      score += (opponent[pairKey(c.teamA[0], c.teamB[0])] || 0) * 4;
+      const rA = playerById(c.teamA[0]).ratingSingles;
+      const rB = playerById(c.teamB[0]).ratingSingles;
+      score += Math.pow(rA - rB, 2) * 4;
+    });
+    return score;
+  }
+
+  let best = null, bestScore = Infinity;
+  for(let iter = 0; iter < 250; iter++){
+    const p = shuffle(playing);
+    const candidate = [];
+    for(let c = 0; c < courts; c++){
+      candidate.push({ teamA: [p[c*2].id], teamB: [p[c*2+1].id] });
+    }
+    const s = scoreAssignment(candidate);
+    if(s < bestScore){ bestScore = s; best = candidate; }
+  }
+
+  best.forEach(c => {
+    [c.teamA[0], c.teamB[0]].forEach(id => {
+      sessionAppearances[id] = (sessionAppearances[id] || 0) + 1;
+    });
+    const rA = playerById(c.teamA[0]).ratingSingles;
+    const rB = playerById(c.teamB[0]).ratingSingles;
+    c.ratingDiff = Math.abs(rA - rB);
+  });
+
+  const round = { mode: 'singles', courts: best, sittingOut: benched.map(p => p.id) };
+  sessionRoundsHistory.push(round);
   return round;
 }
 
@@ -835,9 +918,8 @@ function buildOneRound(){
 function rollbackSchedule(schedule){
   schedule.forEach(round => {
     round.courts.forEach(c => {
-      [c.teamA.M, c.teamA.F, c.teamB.M, c.teamB.F].forEach(id => {
-        if(sessionAppearances[id]) sessionAppearances[id]--;
-      });
+      const ids = round.mode === 'singles' ? [c.teamA[0], c.teamB[0]] : [c.teamA.M, c.teamA.F, c.teamB.M, c.teamB.F];
+      ids.forEach(id => { if(sessionAppearances[id]) sessionAppearances[id]--; });
     });
     const idx = sessionRoundsHistory.indexOf(round);
     if(idx !== -1) sessionRoundsHistory.splice(idx, 1);
@@ -846,11 +928,18 @@ function rollbackSchedule(schedule){
 
 function generateSchedule(){
   const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
-  const men = presentPlayers.filter(p => p.gender === 'M');
-  const women = presentPlayers.filter(p => p.gender === 'F');
-  if(Math.min(men.length, women.length) < 2){
-    showToast('Need at least 2 men and 2 ladies checked in');
-    return;
+  if(sessionGenMode === 'singles'){
+    if(presentPlayers.length < 2){
+      showToast('Need at least 2 players checked in');
+      return;
+    }
+  } else {
+    const men = presentPlayers.filter(p => p.gender === 'M');
+    const women = presentPlayers.filter(p => p.gender === 'F');
+    if(Math.min(men.length, women.length) < 2){
+      showToast('Need at least 2 men and 2 ladies checked in');
+      return;
+    }
   }
   if(currentSchedule) rollbackSchedule(currentSchedule); // clean slate before reshuffling
   const count = Math.max(1, sessionGameCount || 1);
@@ -861,7 +950,7 @@ function generateSchedule(){
     schedule.push(round);
   }
   if(schedule.length === 0){
-    showToast('Need at least 2 men and 2 ladies checked in');
+    showToast(sessionGenMode === 'singles' ? 'Need at least 2 players checked in' : 'Need at least 2 men and 2 ladies checked in');
     return;
   }
   currentSchedule = schedule;
@@ -872,9 +961,12 @@ function renderNextGames(){
   if(state.players.length === 0){
     return emptyState('No players yet', 'Add players first, then generate matchups.', 'players');
   }
-  const men = state.players.filter(p => p.gender === 'M' && sessionPresentIds.has(p.id));
-  const women = state.players.filter(p => p.gender === 'F' && sessionPresentIds.has(p.id));
-  const maxCourts = Math.max(1, Math.min(Math.floor(men.length / 2), Math.floor(women.length / 2)) || 1);
+  const presentAll = state.players.filter(p => sessionPresentIds.has(p.id));
+  const men = presentAll.filter(p => p.gender === 'M');
+  const women = presentAll.filter(p => p.gender === 'F');
+  const maxCourts = sessionGenMode === 'singles'
+    ? Math.max(1, Math.floor(presentAll.length / 2) || 1)
+    : Math.max(1, Math.min(Math.floor(men.length / 2), Math.floor(women.length / 2)) || 1);
   if(sessionCourts === null) sessionCourts = maxCourts;
   if(sessionGameCount === null) sessionGameCount = sessionCourts <= 1 ? 8 : 3;
 
@@ -893,9 +985,15 @@ function renderNextGames(){
       <div class="court-card">
         <div class="court-title"><span>${sessionCourts <= 1 ? 'Court' : `Court ${ci+1}`}</span><span class="quality">${qualityLabel(c.ratingDiff)}</span></div>
         <div class="court-match">
-          <div class="court-side">${escapeHtml(playerById(c.teamA.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamA.F)?.name || '—')}</div>
-          <div class="court-vs">VS</div>
-          <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamB.F)?.name || '—')}</div>
+          ${round.mode === 'singles' ? `
+            <div class="court-side">${escapeHtml(playerById(c.teamA[0])?.name || '—')}</div>
+            <div class="court-vs">VS</div>
+            <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB[0])?.name || '—')}</div>
+          ` : `
+            <div class="court-side">${escapeHtml(playerById(c.teamA.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamA.F)?.name || '—')}</div>
+            <div class="court-vs">VS</div>
+            <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamB.F)?.name || '—')}</div>
+          `}
         </div>
         <button class="btn btn-ghost small-btn" data-log-round="${ri}" data-log-court="${ci}">Log score</button>
       </div>
@@ -904,6 +1002,10 @@ function renderNextGames(){
   `).join('') : '';
 
   return `
+    <div class="team-toggle" id="genModeToggle">
+      <button data-mode="mixed" class="${sessionGenMode==='mixed'?'active':''}">Mixed doubles</button>
+      <button data-mode="singles" class="${sessionGenMode==='singles'?'active':''}">Singles</button>
+    </div>
     <div class="section-title">Who's here today?</div>
     <div class="checklist-card">${checklist}</div>
     <div class="field" style="margin-top:16px">
@@ -948,7 +1050,9 @@ function renderAddMatch(){
 
   let teamSlots;
   if(matchTeamSize === 'singles'){
-    teamSlots = { a: [{label: null, options: optAll, selected: null}], b: [{label: null, options: optAll, selected: null}] };
+    const preA = pre?.type === 'singles' ? pre.teamA?.[0] : null;
+    const preB = pre?.type === 'singles' ? pre.teamB?.[0] : null;
+    teamSlots = { a: [{label: null, options: optAll, selected: preA || null}], b: [{label: null, options: optAll, selected: preB || null}] };
   } else if(matchTeamSize === 'mixed'){
     teamSlots = {
       a: [{label: 'Men', options: optMen, selected: pre?.teamA?.M || null}, {label: 'Ladies', options: optWomen, selected: pre?.teamA?.F || null}],
@@ -1044,7 +1148,10 @@ function renderHistory(){
           <div class="match-score">${m.scoreA}–${m.scoreB}</div>
           <div class="match-side ${!aWon?'winner':''}" style="text-align:right">${escapeHtml(namesB)}</div>
         </div>
-        <button class="btn btn-ghost small-btn" data-edit-match="${m.id}">Edit score</button>
+        <div style="display:flex; gap:8px; margin-top:12px;">
+          <button class="btn btn-ghost small-btn" style="margin-top:0;" data-edit-match="${m.id}">Edit score</button>
+          <button class="btn btn-ghost small-btn" style="margin-top:0; color:var(--coral); border-color:rgba(196,63,38,0.3);" data-delete-match="${m.id}">Delete</button>
+        </div>
       </div>
     `;
   }).join('');
@@ -1162,6 +1269,18 @@ function bindMainEvents(){
     courtsInput.oninput = () => { sessionCourts = Math.max(1, parseInt(courtsInput.value, 10) || 1); };
   }
 
+  const genModeToggle = $('#genModeToggle');
+  if(genModeToggle){
+    genModeToggle.querySelectorAll('button').forEach(btn => {
+      btn.onclick = () => {
+        sessionGenMode = btn.dataset.mode;
+        sessionCourts = null; // recompute suggested max for the new mode
+        currentSchedule = null;
+        render();
+      };
+    });
+  }
+
   const gameCountInput = $('#gameCountInput');
   if(gameCountInput){
     gameCountInput.oninput = () => { sessionGameCount = Math.max(1, parseInt(gameCountInput.value, 10) || 1); };
@@ -1185,8 +1304,13 @@ function bindMainEvents(){
     btn.onclick = () => {
       const round = currentSchedule[parseInt(btn.dataset.logRound, 10)];
       const court = round.courts[parseInt(btn.dataset.logCourt, 10)];
-      matchPrefill = { teamA: court.teamA, teamB: court.teamB };
-      matchTeamSize = 'mixed';
+      if(round.mode === 'singles'){
+        matchPrefill = { type: 'singles', teamA: court.teamA, teamB: court.teamB };
+        matchTeamSize = 'singles';
+      } else {
+        matchPrefill = { type: 'mixed', teamA: court.teamA, teamB: court.teamB };
+        matchTeamSize = 'mixed';
+      }
       view = 'addMatch';
       render();
     };
@@ -1194,6 +1318,10 @@ function bindMainEvents(){
 
   document.querySelectorAll('[data-remove-player]').forEach(btn => {
     btn.onclick = () => removePlayer(btn.dataset.removePlayer);
+  });
+
+  document.querySelectorAll('[data-delete-match]').forEach(btn => {
+    btn.onclick = () => deleteMatch(btn.dataset.deleteMatch);
   });
 
   document.querySelectorAll('[data-edit-match]').forEach(btn => {
