@@ -315,7 +315,7 @@ input:focus, select:focus{
 }
 
 /* Live scoring */
-.scoreboard{display:flex; gap:10px; margin-bottom:14px;}
+.scoreboard{display:flex; align-items:stretch; gap:10px; margin-bottom:14px;}
 .score-side{
   flex:1;
   background: var(--surface);
@@ -323,6 +323,8 @@ input:focus, select:focus{
   padding: 18px 10px;
   text-align: center;
   border: 1px solid rgba(47,82,51,0.06);
+  display: flex;
+  flex-direction: column;
 }
 .score-name{
   font-weight: 700;
@@ -348,8 +350,16 @@ input:focus, select:focus{
   margin: 10px 0 16px;
   line-height: 1;
 }
+.serve-slot-note{
+  font-family: 'DM Mono', monospace;
+  font-size: 10px;
+  color: var(--muted);
+  min-height: 14px;
+  margin-top: 2px;
+}
 .score-tap-btn{
   width: 100%;
+  margin-top: auto;
   padding: 16px;
   border-radius: 12px;
   border: none;
@@ -366,6 +376,45 @@ input:focus, select:focus{
   font-size: 16px;
   color: var(--ball);
   padding: 14px 0 4px;
+}
+
+/* Live-now banner on the Leaderboard (viewer card) */
+.live-now-banner{
+  background: linear-gradient(135deg, var(--surface), var(--surface-2));
+  border: 1px solid rgba(196,63,38,0.28);
+  border-radius: 18px;
+  padding: 16px 16px 18px;
+  margin-bottom: 18px;
+}
+.live-now-header{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.live-pulse-dot{
+  width: 8px; height: 8px;
+  border-radius: 100px;
+  background: var(--coral);
+  flex-shrink: 0;
+  animation: livePulse 1.4s ease-in-out infinite;
+}
+@keyframes livePulse{
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.75); }
+}
+.live-now-label{
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--coral);
+  font-weight: 700;
+}
+.live-now-meta{
+  font-family: 'DM Mono', monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-left: auto;
 }
 
 /* History */
@@ -459,9 +508,28 @@ let matchPrefill = null; // {type:'mixed', teamA:{M,F}, teamB:{M,F}} or {type:'s
 let editingMatchId = null; // id of match currently being score-edited in History tab
 
 // Live scoring state (in-memory only — resets on reload)
-let live = { started: false, type: 'mixed', target: 11, teamA: [], teamB: [], scoreA: 0, scoreB: 0, history: [], serving: 'A' };
+// serverPlayerIndex: which player (0 or 1) within the serving team is serving.
+// serverSlot: 1 or 2 — tracks doubles' two-server rule. Starts at 2 because
+// official pickleball rules treat the very first serve of the game as if it
+// were already the team's second server, so a single loss side-outs immediately.
+let live = { started: false, type: 'mixed', target: 11, teamA: [], teamB: [], scoreA: 0, scoreB: 0, history: [], serving: 'A', serverPlayerIndex: 0, serverSlot: 2 };
 function resetLive(){
-  live = { started: false, type: live.type, target: live.target, teamA: [], teamB: [], scoreA: 0, scoreB: 0, history: [], serving: 'A' };
+  live = { started: false, type: live.type, target: live.target, teamA: [], teamB: [], scoreA: 0, scoreB: 0, history: [], serving: 'A', serverPlayerIndex: 0, serverSlot: 2 };
+}
+
+// Formats a team's player names for display, prefixing a serve-dot next to
+// whichever player is currently serving (only meaningful for the serving team).
+function formatSideNames(teamIds, isServingTeam, servingPlayerId){
+  return teamIds.map(id => {
+    const name = escapeHtml(playerById(id)?.name || '—');
+    return (isServingTeam && id === servingPlayerId) ? `<span class="serve-dot"></span>${name}` : name;
+  }).join(' &amp; ');
+}
+
+// Court side is derived, not tracked — the serving team's own score parity
+// determines it (even = right court, odd = left), regardless of who's serving.
+function serveCourtSide(servingScore){
+  return servingScore % 2 === 0 ? 'Right' : 'Left';
 }
 
 // Admin flag — gated by a shared password, stored locally once entered
@@ -478,10 +546,11 @@ function setAdmin(flag){
 // Live-match viewer state — non-admin devices poll this while on the
 // Leaderboard tab so they can watch the score without controlling it.
 let liveViewerData = null;
+let liveViewerFetchedAt = null;
 let liveViewerPoll = null;
 
 function rowToLiveMatch(r){
-  return { type: r.type, teamA: r.team_a, teamB: r.team_b, scoreA: r.score_a, scoreB: r.score_b, target: r.target, serving: r.serving };
+  return { type: r.type, teamA: r.team_a, teamB: r.team_b, scoreA: r.score_a, scoreB: r.score_b, target: r.target, serving: r.serving, serverPlayerId: r.server_player_id };
 }
 
 async function fetchLiveViewerData(){
@@ -491,6 +560,7 @@ async function fetchLiveViewerData(){
   }catch(e){
     liveViewerData = null;
   }
+  liveViewerFetchedAt = Date.now();
   if(view === 'leaderboard') render();
 }
 
@@ -507,9 +577,12 @@ function stopLiveViewerPolling(){
 // it; best-effort — a missed sync just means the viewer card is a beat stale.
 function syncLiveMatch(){
   if(!live.started) return;
+  const servingTeamArr = live.serving === 'A' ? live.teamA : live.teamB;
+  const serverPlayerId = servingTeamArr[live.serverPlayerIndex] ?? servingTeamArr[0] ?? null;
   supaUpsert('live_matches', [{
     id: 'current', type: live.type, team_a: live.teamA, team_b: live.teamB,
-    score_a: live.scoreA, score_b: live.scoreB, target: live.target, serving: live.serving
+    score_a: live.scoreA, score_b: live.scoreB, target: live.target, serving: live.serving,
+    server_player_id: serverPlayerId
   }]).catch(() => {});
 }
 function clearLiveMatchRemote(){
@@ -528,6 +601,8 @@ function startLiveFromCourt(round, court){
   live.scoreB = 0;
   live.history = [];
   live.serving = 'A';
+  live.serverPlayerIndex = 0;
+  live.serverSlot = 2;
   live.started = true;
   view = 'liveScore';
   render();
@@ -818,15 +893,28 @@ function renderTabs(){
 function renderLiveNowCard(){
   if(!liveViewerData) return '';
   const lv = liveViewerData;
-  const namesA = lv.teamA.map(id => playerById(id)?.name || '—').join(' & ');
-  const namesB = lv.teamB.map(id => playerById(id)?.name || '—').join(' & ');
+  const typeLabel = lv.type === 'singles' ? 'Singles' : lv.type === 'mixed' ? 'Mixed doubles' : 'Doubles';
+  const secondsAgo = liveViewerFetchedAt ? Math.max(0, Math.round((Date.now() - liveViewerFetchedAt) / 1000)) : null;
+  const servingScore = lv.serving === 'A' ? lv.scoreA : lv.scoreB;
+  const sideNote = `<div class="serve-slot-note">${serveCourtSide(servingScore)} court</div>`;
   return `
-    <div class="court-card" style="margin-bottom:16px;">
-      <div class="court-title"><span>● Live now</span><span class="quality">to ${lv.target}</span></div>
-      <div class="court-match">
-        <div class="court-side">${lv.serving==='A' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesA)}</div>
-        <div style="font-family:'DM Mono', monospace; font-size:26px; font-weight:500;">${lv.scoreA}–${lv.scoreB}</div>
-        <div class="court-side" style="text-align:right">${lv.serving==='B' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesB)}</div>
+    <div class="live-now-banner">
+      <div class="live-now-header">
+        <span class="live-pulse-dot"></span>
+        <span class="live-now-label">Live · ${typeLabel} to ${lv.target}</span>
+        ${secondsAgo !== null ? `<span class="live-now-meta">updated ${secondsAgo}s ago</span>` : ''}
+      </div>
+      <div class="scoreboard" style="margin-top:12px; margin-bottom:0;">
+        <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
+          <div class="score-name">${formatSideNames(lv.teamA, lv.serving==='A', lv.serverPlayerId)}</div>
+          ${lv.serving==='A' ? sideNote : ''}
+          <div class="score-value" style="font-size:40px; margin:6px 0 0;">${lv.scoreA}</div>
+        </div>
+        <div class="score-side" style="background:var(--surface-2); padding:14px 8px;">
+          <div class="score-name">${formatSideNames(lv.teamB, lv.serving==='B', lv.serverPlayerId)}</div>
+          ${lv.serving==='B' ? sideNote : ''}
+          <div class="score-value" style="font-size:40px; margin:6px 0 0;">${lv.scoreB}</div>
+        </div>
       </div>
     </div>
   `;
@@ -1189,13 +1277,32 @@ function computeLiveWinner(){
 // Only the serving side can score a point; if the other side wins the rally,
 // no point is awarded and serve just passes to them (a side-out) — standard
 // pickleball team-level scoring, simplified to not track per-player server order.
+// Only the serving side can score. In doubles/mixed, each team gets two
+// server turns per possession (one per player) before a side-out — except
+// the very first serve of the game, which only gets one (serverSlot starts
+// at 2 to encode that). Singles has no partner to hand off to, so any loss
+// is an immediate side-out regardless of serverSlot.
 function recordRally(winner){
   if(computeLiveWinner()) return;
-  live.history.push({ scoreA: live.scoreA, scoreB: live.scoreB, serving: live.serving });
+  live.history.push({
+    scoreA: live.scoreA, scoreB: live.scoreB,
+    serving: live.serving, serverPlayerIndex: live.serverPlayerIndex, serverSlot: live.serverSlot
+  });
   if(winner === live.serving){
     if(winner === 'A') live.scoreA++; else live.scoreB++;
+    // same server continues
   } else {
-    live.serving = winner;
+    const servingTeamSize = (live.serving === 'A' ? live.teamA : live.teamB).length;
+    if(servingTeamSize > 1 && live.serverSlot === 1){
+      // first server of a doubles team loses — partner serves next, team keeps serve
+      live.serverSlot = 2;
+      live.serverPlayerIndex = 1 - live.serverPlayerIndex;
+    } else {
+      // second server loses (or singles) — side-out
+      live.serving = winner;
+      live.serverPlayerIndex = 0;
+      live.serverSlot = 1;
+    }
   }
   render();
   syncLiveMatch();
@@ -1207,6 +1314,8 @@ function undoRally(){
   live.scoreA = prev.scoreA;
   live.scoreB = prev.scoreB;
   live.serving = prev.serving;
+  live.serverPlayerIndex = prev.serverPlayerIndex;
+  live.serverSlot = prev.serverSlot;
   render();
   syncLiveMatch();
 }
@@ -1302,20 +1411,28 @@ function renderLiveSetup(){
 }
 
 function renderLiveBoard(){
-  const namesA = live.teamA.map(id => playerById(id)?.name || '—').join(' & ');
-  const namesB = live.teamB.map(id => playerById(id)?.name || '—').join(' & ');
   const winner = computeLiveWinner();
+  const servingTeamArr = live.serving === 'A' ? live.teamA : live.teamB;
+  const servingPlayerId = servingTeamArr[live.serverPlayerIndex] ?? servingTeamArr[0];
+  const isDoublesFormat = live.type !== 'singles';
+  const servingScore = live.serving === 'A' ? live.scoreA : live.scoreB;
+  const sideLabel = `${serveCourtSide(servingScore)} court`;
+  const serverSlotNote = `<div class="serve-slot-note">${isDoublesFormat ? (live.serverSlot===1?'1st':'2nd')+' server · ' : ''}${sideLabel}</div>`;
+  const plainNamesA = live.teamA.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
+  const plainNamesB = live.teamB.map(id => escapeHtml(playerById(id)?.name || '—')).join(' &amp; ');
 
   return `
     <div class="section-title">Live · playing to ${live.target}</div>
     <div class="scoreboard">
       <div class="score-side">
-        <div class="score-name">${live.serving==='A' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesA)}</div>
+        <div class="score-name">${formatSideNames(live.teamA, live.serving==='A', servingPlayerId)}</div>
+        ${live.serving==='A' ? serverSlotNote : ''}
         <div class="score-value">${live.scoreA}</div>
         <button class="score-tap-btn" id="tapA" ${winner ? 'disabled' : ''}>Team A point</button>
       </div>
       <div class="score-side">
-        <div class="score-name">${live.serving==='B' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesB)}</div>
+        <div class="score-name">${formatSideNames(live.teamB, live.serving==='B', servingPlayerId)}</div>
+        ${live.serving==='B' ? serverSlotNote : ''}
         <div class="score-value">${live.scoreB}</div>
         <button class="score-tap-btn" id="tapB" ${winner ? 'disabled' : ''}>Team B point</button>
       </div>
@@ -1324,7 +1441,7 @@ function renderLiveBoard(){
       <button class="btn btn-ghost" style="margin-top:0;" id="undoPointBtn" ${live.history.length===0?'disabled':''}>Undo</button>
       <button class="btn btn-ghost" style="margin-top:0;" id="switchServeBtn">Switch serve</button>
     </div>
-    ${winner ? `<div class="live-winner-banner">${winner==='A'?escapeHtml(namesA):escapeHtml(namesB)} wins ${live.scoreA}–${live.scoreB}!</div>` : ''}
+    ${winner ? `<div class="live-winner-banner">${winner==='A'?plainNamesA:plainNamesB} wins ${live.scoreA}–${live.scoreB}!</div>` : ''}
     <button class="btn ${winner ? 'btn-primary' : 'btn-ghost'}" id="finishLiveBtn" style="margin-top:${winner?'0':'16px'};">${winner ? 'Log this match' : 'End & log now'}</button>
     <button class="btn btn-ghost" id="cancelLiveBtn">Cancel match</button>
   `;
@@ -1702,6 +1819,8 @@ function bindMainEvents(){
       live.scoreB = 0;
       live.history = [];
       live.serving = 'A';
+      live.serverPlayerIndex = 0;
+      live.serverSlot = 2;
       live.started = true;
       render();
       syncLiveMatch();
@@ -1718,7 +1837,7 @@ function bindMainEvents(){
 
   const switchServeBtn = $('#switchServeBtn');
   if(switchServeBtn){
-    switchServeBtn.onclick = () => { live.serving = live.serving === 'A' ? 'B' : 'A'; render(); syncLiveMatch(); };
+    switchServeBtn.onclick = () => { live.serving = live.serving === 'A' ? 'B' : 'A'; live.serverPlayerIndex = 0; live.serverSlot = 1; render(); syncLiveMatch(); };
   }
 
   const finishLiveBtn = $('#finishLiveBtn');
