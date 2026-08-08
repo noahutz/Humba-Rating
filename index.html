@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kitchen Line — Pickleball Ratings</title>
+<title>Humba Pickleball League — Ratings</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 
 :root{
-  --bg: #0F2E38;
-  --surface: #153B47;
-  --surface-2: #1B4652;
-  --line: #F4F1E8;
-  --ball: #DCE35B;
-  --coral: #E8604C;
-  --muted: #8FB3BA;
-  --text: #F4F1E8;
+  --bg: #F5F1E3;
+  --surface: #FFFFFF;
+  --surface-2: #EFEADA;
+  --line: #2F5233;
+  --ball: #2F5233;
+  --coral: #B5482C;
+  --muted: #77816B;
+  --text: #2A2F1F;
 }
 *{box-sizing:border-box; margin:0; padding:0;}
 body{
@@ -42,8 +42,8 @@ body{
 }
 h1{
   font-family: 'Archivo Black', sans-serif;
-  font-size: 34px;
-  line-height: 1.02;
+  font-size: 28px;
+  line-height: 1.08;
   letter-spacing: -0.01em;
 }
 h1 span{color: var(--ball);}
@@ -113,7 +113,7 @@ main{padding: 20px;}
   display: flex;
   align-items: center;
   gap: 14px;
-  border: 1px solid rgba(244,241,232,0.06);
+  border: 1px solid rgba(47,82,51,0.06);
 }
 .rank{
   font-family: 'DM Mono', monospace;
@@ -137,8 +137,8 @@ main{padding: 20px;}
   vertical-align: middle;
   font-weight: 600;
 }
-.tag-f{background: rgba(232,96,167,0.18); color: #F2A8CE;}
-.tag-m{background: rgba(95,166,232,0.18); color: #8FC3F0;}
+.tag-f{background: rgba(200,80,140,0.15); color: #A8386E;}
+.tag-m{background: rgba(232,197,71,0.30); color: #8A6D0E;}
 .rating-block{text-align: right; flex-shrink: 0;}
 .rating-num{
   font-family: 'DM Mono', monospace;
@@ -152,13 +152,13 @@ main{padding: 20px;}
   font-family: 'DM Mono', monospace;
   margin-top: 1px;
 }
-.delta-up{color: #8FE0A8;}
+.delta-up{color: #2E7D4F;}
 .delta-down{color: var(--coral);}
 .btn-icon-remove{
   flex-shrink: 0;
   width: 30px; height: 30px;
   border-radius: 100px;
-  border: 1px solid rgba(244,241,232,0.12);
+  border: 1px solid rgba(47,82,51,0.12);
   background: transparent;
   color: var(--muted);
   font-size: 14px;
@@ -188,7 +188,7 @@ main{padding: 20px;}
 input[type=text], input[type=number], select{
   width: 100%;
   background: var(--surface-2);
-  border: 1px solid rgba(244,241,232,0.12);
+  border: 1px solid rgba(47,82,51,0.12);
   color: var(--text);
   padding: 12px 14px;
   border-radius: 10px;
@@ -218,7 +218,7 @@ input:focus, select:focus{
 .btn-ghost{
   background: transparent;
   color: var(--muted);
-  border: 1px solid rgba(244,241,232,0.15);
+  border: 1px solid rgba(47,82,51,0.15);
   margin-top: 8px;
 }
 
@@ -229,7 +229,7 @@ input:focus, select:focus{
   flex:1;
   padding: 10px;
   border-radius: 10px;
-  border: 1px solid rgba(244,241,232,0.12);
+  border: 1px solid rgba(47,82,51,0.12);
   background: var(--surface-2);
   color: var(--muted);
   font-family:'DM Mono', monospace;
@@ -272,7 +272,7 @@ input:focus, select:focus{
   align-items:center;
   gap:12px;
   padding:11px 0;
-  border-bottom:1px solid rgba(244,241,232,0.06);
+  border-bottom:1px solid rgba(47,82,51,0.06);
   cursor:pointer;
 }
 .checkbox-row:last-child{border-bottom:none;}
@@ -284,7 +284,7 @@ input:focus, select:focus{
   border-radius: 14px;
   padding: 4px 16px;
   margin-bottom: 4px;
-  border: 1px solid rgba(244,241,232,0.06);
+  border: 1px solid rgba(47,82,51,0.06);
 }
 .small-btn{width:auto; padding:9px 16px; font-size:12.5px; margin-top:12px;}
 .court-card{
@@ -292,7 +292,7 @@ input:focus, select:focus{
   border-radius: 14px;
   padding: 16px;
   margin-bottom: 12px;
-  border: 1px solid rgba(244,241,232,0.06);
+  border: 1px solid rgba(47,82,51,0.06);
 }
 .court-title{
   display:flex; justify-content:space-between; align-items:center;
@@ -320,7 +320,7 @@ input:focus, select:focus{
   border-radius: 12px;
   padding: 14px 16px;
   margin-bottom: 10px;
-  border: 1px solid rgba(244,241,232,0.06);
+  border: 1px solid rgba(47,82,51,0.06);
 }
 .match-date{
   font-family:'DM Mono', monospace;
@@ -375,9 +375,9 @@ input:focus, select:focus{
 <body>
 
 <div class="hero">
-  <div class="eyebrow">Rec league · rating tracker</div>
-  <h1>Kitchen<span>Line</span></h1>
-  <p class="sub">Track matches, watch ratings move. Synced live for everyone who opens this link.</p>
+  <div class="eyebrow">Rating tracker</div>
+  <h1>Humba Pickleball League</h1>
+  <p class="sub">Track matches, watch ratings move. Synced live for the whole crew.</p>
 </div>
 <div class="kitchen-line"></div>
 
@@ -521,7 +521,7 @@ function exportData(){
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `kitchenline-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.download = `humba-backup-${new Date().toISOString().slice(0,10)}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
