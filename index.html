@@ -314,6 +314,60 @@ input:focus, select:focus{
   padding: 12px 4px;
 }
 
+/* Live scoring */
+.scoreboard{display:flex; gap:10px; margin-bottom:14px;}
+.score-side{
+  flex:1;
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 18px 10px;
+  text-align: center;
+  border: 1px solid rgba(47,82,51,0.06);
+}
+.score-name{
+  font-weight: 700;
+  font-size: 13px;
+  min-height: 34px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap: 5px;
+}
+.serve-dot{
+  display:inline-block;
+  width: 8px; height: 8px;
+  border-radius: 100px;
+  background: var(--ball);
+  flex-shrink:0;
+}
+.score-value{
+  font-family:'DM Mono', monospace;
+  font-size: 56px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  margin: 10px 0 16px;
+  line-height: 1;
+}
+.score-tap-btn{
+  width: 100%;
+  padding: 16px;
+  border-radius: 12px;
+  border: none;
+  background: var(--ball);
+  color: var(--bg);
+  font-weight: 800;
+  font-size: 15px;
+  cursor: pointer;
+}
+.score-tap-btn:disabled{ opacity: 0.35; cursor: not-allowed; }
+.live-winner-banner{
+  text-align: center;
+  font-family: 'Archivo Black';
+  font-size: 16px;
+  color: var(--ball);
+  padding: 14px 0 4px;
+}
+
 /* History */
 .match-card{
   background: var(--surface);
@@ -403,6 +457,82 @@ let matchTeamSize = 'mixed'; // 'singles' | 'doubles' | 'mixed'
 let newPlayerGender = 'F';
 let matchPrefill = null; // {type:'mixed', teamA:{M,F}, teamB:{M,F}} or {type:'singles', teamA:[id], teamB:[id]} — pre-fill from generator
 let editingMatchId = null; // id of match currently being score-edited in History tab
+
+// Live scoring state (in-memory only — resets on reload)
+let live = { started: false, type: 'mixed', target: 11, teamA: [], teamB: [], scoreA: 0, scoreB: 0, history: [], serving: 'A' };
+function resetLive(){
+  live = { started: false, type: live.type, target: live.target, teamA: [], teamB: [], scoreA: 0, scoreB: 0, history: [], serving: 'A' };
+}
+
+// Admin flag — gated by a shared password, stored locally once entered
+// correctly. Whoever enables it on their device stays admin until they turn it off.
+const ADMIN_STORAGE_KEY = 'humba-admin';
+const ADMIN_PASSWORD = 'humba';
+let isAdmin = false;
+try{ isAdmin = localStorage.getItem(ADMIN_STORAGE_KEY) === 'true'; }catch(e){ isAdmin = false; }
+function setAdmin(flag){
+  isAdmin = flag;
+  try{ localStorage.setItem(ADMIN_STORAGE_KEY, flag ? 'true' : 'false'); }catch(e){}
+}
+
+// Live-match viewer state — non-admin devices poll this while on the
+// Leaderboard tab so they can watch the score without controlling it.
+let liveViewerData = null;
+let liveViewerPoll = null;
+
+function rowToLiveMatch(r){
+  return { type: r.type, teamA: r.team_a, teamB: r.team_b, scoreA: r.score_a, scoreB: r.score_b, target: r.target, serving: r.serving };
+}
+
+async function fetchLiveViewerData(){
+  try{
+    const rows = await supaSelect('live_matches');
+    liveViewerData = (rows && rows.length) ? rowToLiveMatch(rows[0]) : null;
+  }catch(e){
+    liveViewerData = null;
+  }
+  if(view === 'leaderboard') render();
+}
+
+function startLiveViewerPolling(){
+  if(liveViewerPoll) return;
+  fetchLiveViewerData();
+  liveViewerPoll = setInterval(fetchLiveViewerData, 5000);
+}
+function stopLiveViewerPolling(){
+  if(liveViewerPoll){ clearInterval(liveViewerPoll); liveViewerPoll = null; }
+}
+
+// Pushes the admin's in-progress live match to Supabase so viewers can see
+// it; best-effort — a missed sync just means the viewer card is a beat stale.
+function syncLiveMatch(){
+  if(!live.started) return;
+  supaUpsert('live_matches', [{
+    id: 'current', type: live.type, team_a: live.teamA, team_b: live.teamB,
+    score_a: live.scoreA, score_b: live.scoreB, target: live.target, serving: live.serving
+  }]).catch(() => {});
+}
+function clearLiveMatchRemote(){
+  supaDelete('live_matches', 'current').catch(() => {});
+}
+
+// Jumps straight into live scoring for a court proposed by the Next Games
+// generator — skips the setup screen since the players are already picked.
+function startLiveFromCourt(round, court){
+  const teamA = round.mode === 'singles' ? court.teamA : [court.teamA.M, court.teamA.F];
+  const teamB = round.mode === 'singles' ? court.teamB : [court.teamB.M, court.teamB.F];
+  live.type = round.mode === 'singles' ? 'singles' : 'mixed';
+  live.teamA = teamA;
+  live.teamB = teamB;
+  live.scoreA = 0;
+  live.scoreB = 0;
+  live.history = [];
+  live.serving = 'A';
+  live.started = true;
+  view = 'liveScore';
+  render();
+  syncLiveMatch();
+}
 
 // Next-games generator state (in-memory only, resets on reload — scoped to "today")
 let sessionPresentIds = new Set();
@@ -671,6 +801,7 @@ function renderTabs(){
   const tabs = [
     ['leaderboard', 'Leaderboard'],
     ['nextGames', 'Next games'],
+    ...(isAdmin ? [['liveScore', 'Live score']] : []),
     ['addMatch', 'Log match'],
     ['history', 'History'],
     ['players', 'Players']
@@ -684,6 +815,23 @@ function renderTabs(){
 }
 
 /* ---------- Leaderboard ---------- */
+function renderLiveNowCard(){
+  if(!liveViewerData) return '';
+  const lv = liveViewerData;
+  const namesA = lv.teamA.map(id => playerById(id)?.name || '—').join(' & ');
+  const namesB = lv.teamB.map(id => playerById(id)?.name || '—').join(' & ');
+  return `
+    <div class="court-card" style="margin-bottom:16px;">
+      <div class="court-title"><span>● Live now</span><span class="quality">to ${lv.target}</span></div>
+      <div class="court-match">
+        <div class="court-side">${lv.serving==='A' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesA)}</div>
+        <div style="font-family:'DM Mono', monospace; font-size:26px; font-weight:500;">${lv.scoreA}–${lv.scoreB}</div>
+        <div class="court-side" style="text-align:right">${lv.serving==='B' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesB)}</div>
+      </div>
+    </div>
+  `;
+}
+
 function renderLeaderboard(){
   if(state.players.length === 0){
     return emptyState('No players yet', 'Add a few friends to start tracking ratings.', 'players');
@@ -754,6 +902,10 @@ function renderPlayers(){
     <button class="btn btn-ghost" id="exportBtn">Export data (.json)</button>
     <button class="btn btn-ghost" id="importBtn">Import data (.json)</button>
     <input type="file" id="importFile" accept="application/json" style="display:none">
+    <div style="height:30px"></div>
+    <div class="section-title">Admin</div>
+    <div style="font-size:12px; color:var(--muted); margin-bottom:10px;">Admin can run live scoring on this device. Everyone else can watch it from the Leaderboard. Enabling requires the admin password.</div>
+    <button class="btn btn-ghost" id="toggleAdminBtn">${isAdmin ? 'Disable admin on this device' : 'Enable admin on this device'}</button>
   `;
 }
 
@@ -995,7 +1147,10 @@ function renderNextGames(){
             <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamB.F)?.name || '—')}</div>
           `}
         </div>
-        <button class="btn btn-ghost small-btn" data-log-round="${ri}" data-log-court="${ci}">Log score</button>
+        <div style="display:flex; gap:8px; margin-top:12px;">
+          <button class="btn btn-ghost small-btn" style="margin-top:0;" data-log-round="${ri}" data-log-court="${ci}">Log score</button>
+          ${isAdmin ? `<button class="btn btn-ghost small-btn" style="margin-top:0;" data-start-live-round="${ri}" data-start-live-court="${ci}">Start live scoring</button>` : ''}
+        </div>
       </div>
     `).join('')}
     ${round.sittingOut.length ? `<div class="sitting-out">Sitting out: ${round.sittingOut.map(id => escapeHtml(playerById(id)?.name || '')).join(', ')}</div>` : ''}
@@ -1020,6 +1175,158 @@ function renderNextGames(){
     ${currentSchedule ? `<button class="btn btn-ghost" id="resetRotationBtn">Reset rotation</button>` : ''}
     <div style="height:22px"></div>
     ${scheduleHtml}
+  `;
+}
+
+/* ---------- Live scoring ---------- */
+function computeLiveWinner(){
+  const { scoreA, scoreB, target } = live;
+  if(scoreA >= target && scoreA - scoreB >= 2) return 'A';
+  if(scoreB >= target && scoreB - scoreA >= 2) return 'B';
+  return null;
+}
+
+// Only the serving side can score a point; if the other side wins the rally,
+// no point is awarded and serve just passes to them (a side-out) — standard
+// pickleball team-level scoring, simplified to not track per-player server order.
+function recordRally(winner){
+  if(computeLiveWinner()) return;
+  live.history.push({ scoreA: live.scoreA, scoreB: live.scoreB, serving: live.serving });
+  if(winner === live.serving){
+    if(winner === 'A') live.scoreA++; else live.scoreB++;
+  } else {
+    live.serving = winner;
+  }
+  render();
+  syncLiveMatch();
+}
+
+function undoRally(){
+  const prev = live.history.pop();
+  if(!prev) return;
+  live.scoreA = prev.scoreA;
+  live.scoreB = prev.scoreB;
+  live.serving = prev.serving;
+  render();
+  syncLiveMatch();
+}
+
+async function finishLiveMatch(){
+  state.matches.push({
+    id: uid(), date: Date.now(), type: live.type,
+    teamA: live.teamA, teamB: live.teamB,
+    scoreA: live.scoreA, scoreB: live.scoreB
+  });
+  recomputeRatings();
+  clearLiveMatchRemote();
+  await saveData();
+  showToast('Match logged');
+  resetLive();
+  view = 'leaderboard';
+  render();
+}
+
+function renderLiveScore(){
+  return live.started ? renderLiveBoard() : renderLiveSetup();
+}
+
+function renderLiveSetup(){
+  if(state.players.length < 2){
+    return emptyState('Need more players', 'Add at least two players before starting a live match.', 'players');
+  }
+  const men = state.players.filter(p => p.gender === 'M');
+  const women = state.players.filter(p => p.gender === 'F');
+  const optAll = state.players.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+  const optMen = men.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+  const optWomen = women.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+
+  const typeToggle = `
+    <div class="team-toggle" id="liveTypeToggle">
+      <button data-livetype="singles" class="${live.type==='singles'?'active':''}">Singles</button>
+      <button data-livetype="doubles" class="${live.type==='doubles'?'active':''}">Doubles</button>
+      <button data-livetype="mixed" class="${live.type==='mixed'?'active':''}">Mixed</button>
+    </div>
+  `;
+
+  if(live.type === 'mixed' && (men.length < 2 || women.length < 2)){
+    return `
+      <div class="section-title">Start a live match</div>
+      ${typeToggle}
+      ${emptyState('Need more players', 'Mixed doubles needs at least 2 men and 2 ladies. Add more players first.', 'players')}
+    `;
+  }
+
+  let slots;
+  if(live.type === 'singles'){
+    slots = { a: [{label: null, options: optAll}], b: [{label: null, options: optAll}] };
+  } else if(live.type === 'mixed'){
+    slots = {
+      a: [{label: 'Men', options: optMen}, {label: 'Ladies', options: optWomen}],
+      b: [{label: 'Men', options: optMen}, {label: 'Ladies', options: optWomen}]
+    };
+  } else {
+    slots = { a: [{label: null, options: optAll}, {label: null, options: optAll}], b: [{label: null, options: optAll}, {label: null, options: optAll}] };
+  }
+
+  const renderSlot = (team, i, slot) => `
+    <div class="field" style="margin-bottom:${i===slots[team.toLowerCase()].length-1?'0':'10px'}">
+      ${slot.label ? `<label style="margin-bottom:5px">${slot.label}</label>` : ''}
+      <select data-liveteam="${team}" data-liveslot="${i}">
+        <option value="">Select player…</option>
+        ${slot.options}
+      </select>
+    </div>
+  `;
+
+  return `
+    <div class="section-title">Start a live match</div>
+    ${typeToggle}
+    <div class="team-block team-a">
+      <div class="team-label">Team A</div>
+      ${slots.a.map((s, i) => renderSlot('A', i, s)).join('')}
+    </div>
+    <div class="team-block team-b">
+      <div class="team-label">Team B</div>
+      ${slots.b.map((s, i) => renderSlot('B', i, s)).join('')}
+    </div>
+    <div class="field">
+      <label>Play to</label>
+      <div class="team-toggle" id="liveTargetToggle">
+        <button data-target="11" class="${live.target===11?'active':''}">11</button>
+        <button data-target="15" class="${live.target===15?'active':''}">15</button>
+        <button data-target="21" class="${live.target===21?'active':''}">21</button>
+      </div>
+    </div>
+    <button class="btn btn-primary" id="startLiveBtn">Start scoring</button>
+  `;
+}
+
+function renderLiveBoard(){
+  const namesA = live.teamA.map(id => playerById(id)?.name || '—').join(' & ');
+  const namesB = live.teamB.map(id => playerById(id)?.name || '—').join(' & ');
+  const winner = computeLiveWinner();
+
+  return `
+    <div class="section-title">Live · playing to ${live.target}</div>
+    <div class="scoreboard">
+      <div class="score-side">
+        <div class="score-name">${live.serving==='A' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesA)}</div>
+        <div class="score-value">${live.scoreA}</div>
+        <button class="score-tap-btn" id="tapA" ${winner ? 'disabled' : ''}>Team A point</button>
+      </div>
+      <div class="score-side">
+        <div class="score-name">${live.serving==='B' ? '<span class="serve-dot"></span>' : ''}${escapeHtml(namesB)}</div>
+        <div class="score-value">${live.scoreB}</div>
+        <button class="score-tap-btn" id="tapB" ${winner ? 'disabled' : ''}>Team B point</button>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-ghost" style="margin-top:0;" id="undoPointBtn" ${live.history.length===0?'disabled':''}>Undo</button>
+      <button class="btn btn-ghost" style="margin-top:0;" id="switchServeBtn">Switch serve</button>
+    </div>
+    ${winner ? `<div class="live-winner-banner">${winner==='A'?escapeHtml(namesA):escapeHtml(namesB)} wins ${live.scoreA}–${live.scoreB}!</div>` : ''}
+    <button class="btn ${winner ? 'btn-primary' : 'btn-ghost'}" id="finishLiveBtn" style="margin-top:${winner?'0':'16px'};">${winner ? 'Log this match' : 'End & log now'}</button>
+    <button class="btn btn-ghost" id="cancelLiveBtn">Cancel match</button>
   `;
 }
 
@@ -1175,15 +1482,19 @@ function escapeHtml(str){
 
 /* ---------- Render root ---------- */
 function render(){
+  if(view === 'liveScore' && !isAdmin) view = 'leaderboard'; // admin-only tab
+  if(view === 'leaderboard') startLiveViewerPolling(); else stopLiveViewerPolling();
+
   renderTabs();
   const m = $('#main');
   if(!state.loaded){
     m.innerHTML = `<div class="empty"><div class="empty-title">Loading…</div></div>`;
     return;
   }
-  if(view === 'leaderboard') m.innerHTML = renderLeaderboard() + shareNote();
+  if(view === 'leaderboard') m.innerHTML = renderLiveNowCard() + renderLeaderboard() + shareNote();
   else if(view === 'players') m.innerHTML = renderPlayers();
   else if(view === 'nextGames') m.innerHTML = renderNextGames();
+  else if(view === 'liveScore') m.innerHTML = renderLiveScore();
   else if(view === 'addMatch') m.innerHTML = renderAddMatch();
   else if(view === 'history') m.innerHTML = renderHistory();
 
@@ -1257,6 +1568,27 @@ function bindMainEvents(){
     };
   }
 
+  const toggleAdminBtn = $('#toggleAdminBtn');
+  if(toggleAdminBtn){
+    toggleAdminBtn.onclick = () => {
+      if(isAdmin){
+        setAdmin(false);
+        showToast('Admin disabled on this device');
+        render();
+        return;
+      }
+      const entered = prompt('Enter admin password:');
+      if(entered === null) return; // cancelled
+      if(entered.trim().toLowerCase() === ADMIN_PASSWORD){
+        setAdmin(true);
+        showToast('Admin enabled on this device');
+        render();
+      } else {
+        showToast('Incorrect password');
+      }
+    };
+  }
+
   document.querySelectorAll('[data-presence]').forEach(cb => {
     cb.onchange = () => {
       const id = cb.dataset.presence;
@@ -1316,6 +1648,14 @@ function bindMainEvents(){
     };
   });
 
+  document.querySelectorAll('[data-start-live-court]').forEach(btn => {
+    btn.onclick = () => {
+      const round = currentSchedule[parseInt(btn.dataset.startLiveRound, 10)];
+      const court = round.courts[parseInt(btn.dataset.startLiveCourt, 10)];
+      startLiveFromCourt(round, court);
+    };
+  });
+
   document.querySelectorAll('[data-remove-player]').forEach(btn => {
     btn.onclick = () => removePlayer(btn.dataset.removePlayer);
   });
@@ -1323,6 +1663,89 @@ function bindMainEvents(){
   document.querySelectorAll('[data-delete-match]').forEach(btn => {
     btn.onclick = () => deleteMatch(btn.dataset.deleteMatch);
   });
+
+  const liveTypeToggle = $('#liveTypeToggle');
+  if(liveTypeToggle){
+    liveTypeToggle.querySelectorAll('button').forEach(btn => {
+      btn.onclick = () => { live.type = btn.dataset.livetype; render(); };
+    });
+  }
+
+  const liveTargetToggle = $('#liveTargetToggle');
+  if(liveTargetToggle){
+    liveTargetToggle.querySelectorAll('button').forEach(btn => {
+      btn.onclick = () => { live.target = parseInt(btn.dataset.target, 10); render(); };
+    });
+  }
+
+  const startLiveBtn = $('#startLiveBtn');
+  if(startLiveBtn){
+    startLiveBtn.onclick = () => {
+      const selects = document.querySelectorAll('select[data-liveteam]');
+      const teamA = [], teamB = [];
+      selects.forEach(s => {
+        if(!s.value) return;
+        (s.dataset.liveteam === 'A' ? teamA : teamB).push(s.value);
+      });
+      const needed = live.type === 'singles' ? 1 : 2;
+      if(teamA.length < needed || teamB.length < needed){
+        showToast('Pick all players for both teams');
+        return;
+      }
+      if(new Set([...teamA, ...teamB]).size !== teamA.length + teamB.length){
+        showToast("A player can't be on both teams");
+        return;
+      }
+      live.teamA = teamA;
+      live.teamB = teamB;
+      live.scoreA = 0;
+      live.scoreB = 0;
+      live.history = [];
+      live.serving = 'A';
+      live.started = true;
+      render();
+      syncLiveMatch();
+    };
+  }
+
+  const tapA = $('#tapA');
+  if(tapA) tapA.onclick = () => recordRally('A');
+  const tapB = $('#tapB');
+  if(tapB) tapB.onclick = () => recordRally('B');
+
+  const undoPointBtn = $('#undoPointBtn');
+  if(undoPointBtn) undoPointBtn.onclick = undoRally;
+
+  const switchServeBtn = $('#switchServeBtn');
+  if(switchServeBtn){
+    switchServeBtn.onclick = () => { live.serving = live.serving === 'A' ? 'B' : 'A'; render(); syncLiveMatch(); };
+  }
+
+  const finishLiveBtn = $('#finishLiveBtn');
+  if(finishLiveBtn){
+    finishLiveBtn.onclick = () => {
+      if(live.scoreA === live.scoreB){
+        showToast("Scores can't be tied");
+        return;
+      }
+      if(computeLiveWinner()){
+        finishLiveMatch();
+      } else if(confirm(`Log ${live.scoreA}–${live.scoreB} as the final score?`)){
+        finishLiveMatch();
+      }
+    };
+  }
+
+  const cancelLiveBtn = $('#cancelLiveBtn');
+  if(cancelLiveBtn){
+    cancelLiveBtn.onclick = () => {
+      if(confirm('Discard this live match? Nothing will be saved.')){
+        clearLiveMatchRemote();
+        resetLive();
+        render();
+      }
+    };
+  }
 
   document.querySelectorAll('[data-edit-match]').forEach(btn => {
     btn.onclick = () => { editingMatchId = btn.dataset.editMatch; render(); };
