@@ -843,6 +843,10 @@ function recomputeRatings(){
     p.matchesSingles = 0;
     p.wins = 0;
     p.losses = 0;
+    p.winsDoubles = 0;
+    p.lossesDoubles = 0;
+    p.winsSingles = 0;
+    p.lossesSingles = 0;
     p.lastDelta = null;
     p.lastDeltaFormat = null;
   });
@@ -854,6 +858,8 @@ function recomputeRatings(){
 
     const field = ratingField(m.type);
     const mField = matchesField(m.type);
+    const winsField = mField === 'matchesDoubles' ? 'winsDoubles' : 'winsSingles';
+    const lossesField = mField === 'matchesDoubles' ? 'lossesDoubles' : 'lossesSingles';
     const ratingA = teamAPlayers.reduce((s, p) => s + p[field], 0) / teamAPlayers.length;
     const ratingB = teamBPlayers.reduce((s, p) => s + p[field], 0) / teamBPlayers.length;
     const ratable = isRatable(ratingA, ratingB);
@@ -862,12 +868,12 @@ function recomputeRatings(){
     teamAPlayers.forEach(p => {
       if(ratable){ p[field] = clamp(p[field] + delta, 2.0, 8.0); p.lastDelta = delta; p.lastDeltaFormat = field; }
       p[mField]++;
-      if(m.scoreA > m.scoreB) p.wins++; else p.losses++;
+      if(m.scoreA > m.scoreB){ p.wins++; p[winsField]++; } else { p.losses++; p[lossesField]++; }
     });
     teamBPlayers.forEach(p => {
       if(ratable){ p[field] = clamp(p[field] - delta, 2.0, 8.0); p.lastDelta = -delta; p.lastDeltaFormat = field; }
       p[mField]++;
-      if(m.scoreB > m.scoreA) p.wins++; else p.losses++;
+      if(m.scoreB > m.scoreA){ p.wins++; p[winsField]++; } else { p.losses++; p[lossesField]++; }
     });
     m.deltaA = delta;
     m.deltaB = -delta;
@@ -981,12 +987,14 @@ function renderLeaderboard(){
     const matches = p[mField];
     const rated = matches > 0;
     const reliability = Math.min(100, Math.round((matches / RELIABILITY_MATCHES) * 100));
+    const wins = leaderboardMode === 'doubles' ? p.winsDoubles : p.winsSingles;
+    const losses = leaderboardMode === 'doubles' ? p.lossesDoubles : p.lossesSingles;
     return `
     <div class="card">
       <div class="rank ${i===0?'gold':''}">${i+1}</div>
       <div class="player-info">
         <div class="player-name">${escapeHtml(p.name)} <span class="gender-tag ${p.gender==='F'?'tag-f':'tag-m'}">${p.gender==='F'?'Ladies':'Men'}</span></div>
-        <div class="player-record">${matches} match${matches===1?'':'es'} · ${reliability}% reliable</div>
+        <div class="player-record">${rated ? `${wins}-${losses}` : '0-0'} · ${matches} match${matches===1?'':'es'} · ${reliability}% reliable</div>
       </div>
       <div class="rating-block">
         <div class="rating-num">${rated ? p[field].toFixed(3) : 'NR'}</div>
