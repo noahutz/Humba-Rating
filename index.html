@@ -530,6 +530,7 @@ let matchTeamSize = 'mixed'; // 'singles' | 'doubles' | 'mixed'
 let newPlayerGender = 'F';
 let matchPrefill = null; // {type:'mixed', teamA:{M,F}, teamB:{M,F}} or {type:'singles', teamA:[id], teamB:[id]} — pre-fill from generator
 let editingMatchId = null; // id of match currently being score-edited in History tab
+let pendingCourtSource = null; // {roundIndex, courtIndex} of a Next-games court being logged/played — removed from the schedule once actually logged; cleared if abandoned
 
 // Live scoring state (in-memory only — resets on reload)
 // serverPlayerIndex: which player (0 or 1) within the serving team is serving.
@@ -653,7 +654,7 @@ let sessionPresentIds = new Set();
 let sessionGenMode = 'mixed';  // 'mixed' | 'singles'
 let sessionCourts = null;
 let sessionGameCount = null;   // how many rounds/games to generate in one batch
-let sessionAppearances = {};   // playerId -> times assigned to a court this session
+let sessionAppearances = {};   // playerId -> games played today (seeded from real match history, then topped up per proposed round)
 let sessionRoundsHistory = []; // array of generated rounds (for repeat-avoidance)
 let currentSchedule = null;    // array of generated rounds: [{courts, sittingOut}, ...]
 let selA = [null, null];
@@ -924,7 +925,7 @@ function renderTabs(){
     `<button class="tab ${view===key?'active':''}" data-tab="${key}">${label}</button>`
   ).join('');
   document.querySelectorAll('.tab').forEach(btn=>{
-    btn.onclick = () => { view = btn.dataset.tab; render(); };
+    btn.onclick = () => { pendingCourtSource = null; view = btn.dataset.tab; render(); };
   });
 }
 
@@ -1047,6 +1048,35 @@ function shuffle(arr){
   return a;
 }
 
+// Ground truth for "games played today" — read from actually-logged matches,
+// not from in-memory proposals. This survives regenerate/reset and correctly
+// reflects games that were played from an earlier batch this session.
+function isToday(ts){
+  const d = new Date(ts), now = new Date();
+  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+}
+function getTodaysAppearanceCounts(){
+  const counts = {};
+  state.matches.forEach(m => {
+    if(!isToday(m.date)) return;
+    [...m.teamA, ...m.teamB].forEach(id => { counts[id] = (counts[id] || 0) + 1; });
+  });
+  return counts;
+}
+
+// Removes a court from the currently displayed Next-games schedule once it's
+// actually been logged (or played live), so it stops showing as "to play".
+function removePendingScheduleCourt(){
+  const source = pendingCourtSource;
+  pendingCourtSource = null;
+  if(!source || !currentSchedule) return;
+  const round = currentSchedule[source.roundIndex];
+  if(!round) return;
+  round.courts.splice(source.courtIndex, 1);
+  if(round.courts.length === 0) currentSchedule.splice(source.roundIndex, 1);
+  if(currentSchedule.length === 0) currentSchedule = null;
+}
+
 function buildHistoryCounts(){
   const partner = {}, opponent = {};
   const addPartner = (a, b) => { const k = pairKey(a, b); partner[k] = (partner[k] || 0) + 1; };
@@ -1084,7 +1114,9 @@ function buildOneMixedRound(){
 
   const neededEach = courts * 2;
   const sortByAppearance = arr => [...arr].sort((a, b) =>
-    (sessionAppearances[a.id] || 0) - (sessionAppearances[b.id] || 0) || Math.random() - 0.5
+    (sessionAppearances[a.id] || 0) - (sessionAppearances[b.id] || 0) ||
+    (a.matchesDoubles || 0) - (b.matchesDoubles || 0) ||
+    Math.random() - 0.5
   );
   const playingMen = sortByAppearance(men).slice(0, neededEach);
   const playingWomen = sortByAppearance(women).slice(0, neededEach);
@@ -1146,7 +1178,9 @@ function buildOneSinglesRound(){
 
   const neededEach = courts * 2;
   const sortByAppearance = arr => [...arr].sort((a, b) =>
-    (sessionAppearances[a.id] || 0) - (sessionAppearances[b.id] || 0) || Math.random() - 0.5
+    (sessionAppearances[a.id] || 0) - (sessionAppearances[b.id] || 0) ||
+    (a.matchesSingles || 0) - (b.matchesSingles || 0) ||
+    Math.random() - 0.5
   );
   const playing = sortByAppearance(presentPlayers).slice(0, neededEach);
   const playingIds = new Set(playing.map(p => p.id));
@@ -1190,20 +1224,6 @@ function buildOneSinglesRound(){
   return round;
 }
 
-// Undoes the appearance counts and pairing-history entries from a schedule
-// that was generated but never actually played (i.e. replaced by a
-// regenerate) — so discarded proposals don't bias future fairness/variety.
-function rollbackSchedule(schedule){
-  schedule.forEach(round => {
-    round.courts.forEach(c => {
-      const ids = round.mode === 'singles' ? [c.teamA[0], c.teamB[0]] : [c.teamA.M, c.teamA.F, c.teamB.M, c.teamB.F];
-      ids.forEach(id => { if(sessionAppearances[id]) sessionAppearances[id]--; });
-    });
-    const idx = sessionRoundsHistory.indexOf(round);
-    if(idx !== -1) sessionRoundsHistory.splice(idx, 1);
-  });
-}
-
 function generateSchedule(){
   const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
   if(sessionGenMode === 'singles'){
@@ -1219,7 +1239,11 @@ function generateSchedule(){
       return;
     }
   }
-  if(currentSchedule) rollbackSchedule(currentSchedule); // clean slate before reshuffling
+  // Reseed from actually-logged games today, discarding any unplayed
+  // proposals from a previous batch — so games already played (even from
+  // an earlier generate) are never forgotten or double-counted.
+  sessionRoundsHistory = [];
+  sessionAppearances = getTodaysAppearanceCounts();
   const count = Math.max(1, sessionGameCount || 1);
   const schedule = [];
   for(let i = 0; i < count; i++){
@@ -1365,6 +1389,7 @@ async function finishLiveMatch(){
     scoreA: live.scoreA, scoreB: live.scoreB
   });
   recomputeRatings();
+  removePendingScheduleCourt();
   clearLiveMatchRemote();
   await saveData();
   showToast('Match logged');
@@ -1786,18 +1811,22 @@ function bindMainEvents(){
   const resetRotationBtn = $('#resetRotationBtn');
   if(resetRotationBtn){
     resetRotationBtn.onclick = () => {
-      sessionAppearances = {};
+      // Clears the pending (unplayed) proposed schedule — fairness still
+      // resyncs to today's actually-logged games on the next generate.
+      sessionAppearances = getTodaysAppearanceCounts();
       sessionRoundsHistory = [];
       currentSchedule = null;
-      showToast('Rotation reset');
+      showToast('Rotation reset — resynced to today\u2019s logged games');
       render();
     };
   }
 
   document.querySelectorAll('[data-log-court]').forEach(btn => {
     btn.onclick = () => {
-      const round = currentSchedule[parseInt(btn.dataset.logRound, 10)];
-      const court = round.courts[parseInt(btn.dataset.logCourt, 10)];
+      const roundIndex = parseInt(btn.dataset.logRound, 10);
+      const courtIndex = parseInt(btn.dataset.logCourt, 10);
+      const round = currentSchedule[roundIndex];
+      const court = round.courts[courtIndex];
       if(round.mode === 'singles'){
         matchPrefill = { type: 'singles', teamA: court.teamA, teamB: court.teamB };
         matchTeamSize = 'singles';
@@ -1805,6 +1834,7 @@ function bindMainEvents(){
         matchPrefill = { type: 'mixed', teamA: court.teamA, teamB: court.teamB };
         matchTeamSize = 'mixed';
       }
+      pendingCourtSource = { roundIndex, courtIndex };
       view = 'addMatch';
       render();
     };
@@ -1812,8 +1842,11 @@ function bindMainEvents(){
 
   document.querySelectorAll('[data-start-live-court]').forEach(btn => {
     btn.onclick = () => {
-      const round = currentSchedule[parseInt(btn.dataset.startLiveRound, 10)];
-      const court = round.courts[parseInt(btn.dataset.startLiveCourt, 10)];
+      const roundIndex = parseInt(btn.dataset.startLiveRound, 10);
+      const courtIndex = parseInt(btn.dataset.startLiveCourt, 10);
+      const round = currentSchedule[roundIndex];
+      const court = round.courts[courtIndex];
+      pendingCourtSource = { roundIndex, courtIndex };
       startLiveFromCourt(round, court);
     };
   });
@@ -1904,6 +1937,7 @@ function bindMainEvents(){
   if(cancelLiveBtn){
     cancelLiveBtn.onclick = () => {
       if(confirm('Discard this live match? Nothing will be saved.')){
+        pendingCourtSource = null;
         clearLiveMatchRemote();
         resetLive();
         render();
@@ -1976,6 +2010,7 @@ function bindMainEvents(){
         teamA, teamB, scoreA, scoreB
       });
       recomputeRatings();
+      removePendingScheduleCourt();
 
       const justLogged = state.matches[state.matches.length - 1];
       const ratedToast = justLogged.ratable === false ? 'Match logged — rating gap over 1.0, no rating change' : 'Match logged';
