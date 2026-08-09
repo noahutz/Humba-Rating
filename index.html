@@ -126,6 +126,8 @@ main{padding: 20px;}
 .player-info{flex: 1; min-width: 0;}
 .player-name{font-weight: 700; font-size: 15.5px;}
 .player-record{font-size: 12px; color: var(--muted); margin-top: 2px;}
+.record-w{color: #2E7D4F; font-weight: 700;}
+.record-l{color: var(--coral); font-weight: 700;}
 .gender-tag{
   font-family:'DM Mono', monospace;
   font-size: 9.5px;
@@ -994,7 +996,7 @@ function renderLeaderboard(){
       <div class="rank ${i===0?'gold':''}">${i+1}</div>
       <div class="player-info">
         <div class="player-name">${escapeHtml(p.name)} <span class="gender-tag ${p.gender==='F'?'tag-f':'tag-m'}">${p.gender==='F'?'Ladies':'Men'}</span></div>
-        <div class="player-record">${rated ? `${wins}-${losses}` : '0-0'} · ${matches} match${matches===1?'':'es'} · ${reliability}% reliable</div>
+        <div class="player-record">${rated ? `<span class="record-w">${wins}W</span> · <span class="record-l">${losses}L</span>` : '<span class="record-w">0W</span> · <span class="record-l">0L</span>'} · ${matches} match${matches===1?'':'es'} · ${reliability}% reliable</div>
       </div>
       <div class="rating-block">
         <div class="rating-num">${rated ? p[field].toFixed(3) : 'NR'}</div>
