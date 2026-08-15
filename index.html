@@ -634,9 +634,9 @@ function resumeLiveFromRemote(lv){
 // Jumps straight into live scoring for a court proposed by the Next Games
 // generator — skips the setup screen since the players are already picked.
 function startLiveFromCourt(round, court){
-  const teamA = round.mode === 'singles' ? court.teamA : [court.teamA.M, court.teamA.F];
-  const teamB = round.mode === 'singles' ? court.teamB : [court.teamB.M, court.teamB.F];
-  live.type = round.mode === 'singles' ? 'singles' : 'mixed';
+  const teamA = round.mode === 'singles' || isArrayDoubles(round.mode) ? court.teamA : [court.teamA.M, court.teamA.F];
+  const teamB = round.mode === 'singles' || isArrayDoubles(round.mode) ? court.teamB : [court.teamB.M, court.teamB.F];
+  live.type = round.mode === 'singles' ? 'singles' : isArrayDoubles(round.mode) ? 'doubles' : 'mixed';
   live.teamA = teamA;
   live.teamB = teamB;
   live.scoreA = 0;
@@ -653,11 +653,12 @@ function startLiveFromCourt(round, court){
 
 // Next-games generator state (in-memory only, resets on reload — scoped to "today")
 let sessionPresentIds = new Set();
-let sessionGenMode = 'mixed';  // 'mixed' | 'singles'
+let sessionGenMode = 'mixed';  // 'mixed' | 'notMixed' | 'singles'
 let sessionCourts = null;
 let sessionGameCount = null;   // how many rounds/games to generate in one batch
 let sessionAppearances = {};   // playerId -> games played today (seeded from real match history, then topped up per proposed round)
 let sessionRoundsHistory = []; // array of generated rounds (for repeat-avoidance)
+let sessionCourtGenderCursor = 'M'; // 'notMixed' mode alternates which gender gets the next court, court by court
 let currentSchedule = null;    // array of generated rounds: [{courts, sittingOut}, ...]
 let selA = [null, null];
 let selB = [null, null];
@@ -989,8 +990,8 @@ function renderLeaderboard(){
     const matches = p[mField];
     const rated = matches > 0;
     const reliability = Math.min(100, Math.round((matches / RELIABILITY_MATCHES) * 100));
-    const wins = leaderboardMode === 'doubles' ? p.winsDoubles : p.winsSingles;
-    const losses = leaderboardMode === 'doubles' ? p.lossesDoubles : p.lossesSingles;
+    const wins = leaderboardMode === 'singles' ? p.winsSingles : p.winsDoubles;
+    const losses = leaderboardMode === 'singles' ? p.lossesSingles : p.lossesDoubles;
     return `
     <div class="card">
       <div class="rank ${i===0?'gold':''}">${i+1}</div>
@@ -1048,6 +1049,10 @@ function renderPlayers(){
 
 /* ---------- Next games generator ---------- */
 function pairKey(a, b){ return [a, b].sort().join('|'); }
+// Open/men's/women's doubles all use the same array-based {teamA:[id,id]}
+// court shape (no gendered slots) — this just distinguishes that shape
+// from the mixed-doubles {teamA:{M,F}} shape used elsewhere.
+function isArrayDoubles(mode){ return mode === 'notMixed'; }
 
 function shuffle(arr){
   const a = [...arr];
@@ -1100,6 +1105,10 @@ function buildHistoryCounts(){
     r.courts.forEach(c => {
       if(r.mode === 'singles'){
         addOpponent(c.teamA[0], c.teamB[0]);
+      } else if(isArrayDoubles(r.mode)){
+        addPartner(c.teamA[0], c.teamA[1]);
+        addPartner(c.teamB[0], c.teamB[1]);
+        c.teamA.forEach(a => c.teamB.forEach(b => addOpponent(a, b)));
       } else {
         addPartner(c.teamA.M, c.teamA.F);
         addPartner(c.teamB.M, c.teamB.F);
@@ -1111,7 +1120,9 @@ function buildHistoryCounts(){
 }
 
 function buildOneRound(){
-  return sessionGenMode === 'singles' ? buildOneSinglesRound() : buildOneMixedRound();
+  if(sessionGenMode === 'singles') return buildOneSinglesRound();
+  if(sessionGenMode === 'notMixed') return buildNotMixedRound();
+  return buildOneMixedRound();
 }
 
 function buildOneMixedRound(){
@@ -1180,6 +1191,109 @@ function buildOneMixedRound(){
   return round;
 }
 
+// "Not mixed" — strictly same-gender doubles: a men's team only ever plays
+// another men's team, a ladies' team only ever plays another ladies' team.
+// Which gender gets each court alternates (court by court, carrying across
+// rounds in the same batch) so nobody's stuck waiting through every men's
+// game before a women's game gets scheduled, or vice versa.
+function buildSameGenderCourts(pool, courtCount){
+  if(courtCount <= 0) return [];
+  const playing = pool.slice(0, courtCount * 4);
+  const { partner, opponent } = buildHistoryCounts();
+
+  function scoreAssignment(courtsArr){
+    let score = 0;
+    courtsArr.forEach(c => {
+      score += (partner[pairKey(c.teamA[0], c.teamA[1])] || 0) * 6;
+      score += (partner[pairKey(c.teamB[0], c.teamB[1])] || 0) * 6;
+      c.teamA.forEach(a => c.teamB.forEach(b => {
+        score += (opponent[pairKey(a, b)] || 0) * 2;
+      }));
+      const rA = (playerById(c.teamA[0]).ratingDoubles + playerById(c.teamA[1]).ratingDoubles) / 2;
+      const rB = (playerById(c.teamB[0]).ratingDoubles + playerById(c.teamB[1]).ratingDoubles) / 2;
+      score += Math.pow(rA - rB, 2) * 4;
+    });
+    return score;
+  }
+
+  let best = null, bestScore = Infinity;
+  for(let iter = 0; iter < 250; iter++){
+    const p = shuffle(playing);
+    const candidate = [];
+    for(let c = 0; c < courtCount; c++){
+      const four = p.slice(c*4, c*4+4);
+      if(Math.random() < 0.5){
+        candidate.push({ teamA: [four[0].id, four[1].id], teamB: [four[2].id, four[3].id] });
+      } else {
+        candidate.push({ teamA: [four[0].id, four[2].id], teamB: [four[1].id, four[3].id] });
+      }
+    }
+    const s = scoreAssignment(candidate);
+    if(s < bestScore){ bestScore = s; best = candidate; }
+  }
+
+  best.forEach(c => {
+    [...c.teamA, ...c.teamB].forEach(id => {
+      sessionAppearances[id] = (sessionAppearances[id] || 0) + 1;
+    });
+    const rA = (playerById(c.teamA[0]).ratingDoubles + playerById(c.teamA[1]).ratingDoubles) / 2;
+    const rB = (playerById(c.teamB[0]).ratingDoubles + playerById(c.teamB[1]).ratingDoubles) / 2;
+    c.ratingDiff = Math.abs(rA - rB);
+  });
+  return best;
+}
+
+function buildNotMixedRound(){
+  const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
+  const sortByAppearance = arr => [...arr].sort((a, b) =>
+    (sessionAppearances[a.id] || 0) - (sessionAppearances[b.id] || 0) ||
+    (a.matchesDoubles || 0) - (b.matchesDoubles || 0) ||
+    Math.random() - 0.5
+  );
+  const sortedMen = sortByAppearance(presentPlayers.filter(p => p.gender === 'M'));
+  const sortedWomen = sortByAppearance(presentPlayers.filter(p => p.gender === 'F'));
+
+  // Decide, court by court, which gender plays there — alternating, but
+  // falling back to whichever gender still has enough players if the
+  // preferred one has run out for this round.
+  const courtsWanted = Math.max(1, sessionCourts || 1);
+  const courtGenders = [];
+  let usedMen = 0, usedWomen = 0;
+  for(let i = 0; i < courtsWanted; i++){
+    const want = sessionCourtGenderCursor;
+    const other = want === 'M' ? 'F' : 'M';
+    const wantAvail = (want === 'M' ? sortedMen.length - usedMen : sortedWomen.length - usedWomen);
+    const otherAvail = (other === 'M' ? sortedMen.length - usedMen : sortedWomen.length - usedWomen);
+    let chosen;
+    if(wantAvail >= 4) chosen = want;
+    else if(otherAvail >= 4) chosen = other;
+    else break;
+    courtGenders.push(chosen);
+    if(chosen === 'M') usedMen += 4; else usedWomen += 4;
+    sessionCourtGenderCursor = chosen === 'M' ? 'F' : 'M';
+  }
+  if(courtGenders.length === 0) return null;
+
+  const menCourtCount = courtGenders.filter(g => g === 'M').length;
+  const womenCourtCount = courtGenders.filter(g => g === 'F').length;
+  const menCourts = buildSameGenderCourts(sortedMen, menCourtCount);
+  const womenCourts = buildSameGenderCourts(sortedWomen, womenCourtCount);
+
+  let mi = 0, wi = 0;
+  const orderedCourts = courtGenders.map(g => {
+    const c = g === 'M' ? menCourts[mi++] : womenCourts[wi++];
+    c.gender = g;
+    return c;
+  });
+
+  const playingIds = new Set(orderedCourts.flatMap(c => [...c.teamA, ...c.teamB]));
+  const benched = presentPlayers.filter(p => !playingIds.has(p.id));
+
+  const round = { mode: 'notMixed', courts: orderedCourts, sittingOut: benched.map(p => p.id) };
+  sessionRoundsHistory.push(round);
+  return round;
+}
+
 function buildOneSinglesRound(){
   const presentPlayers = state.players.filter(p => sessionPresentIds.has(p.id));
   const maxCourtsByCount = Math.floor(presentPlayers.length / 2);
@@ -1241,6 +1355,13 @@ function generateSchedule(){
       showToast('Need at least 2 players checked in');
       return;
     }
+  } else if(sessionGenMode === 'notMixed'){
+    const men = presentPlayers.filter(p => p.gender === 'M');
+    const women = presentPlayers.filter(p => p.gender === 'F');
+    if(Math.max(men.length, women.length) < 4){
+      showToast('Need at least 4 men or 4 ladies checked in');
+      return;
+    }
   } else {
     const men = presentPlayers.filter(p => p.gender === 'M');
     const women = presentPlayers.filter(p => p.gender === 'F');
@@ -1254,6 +1375,7 @@ function generateSchedule(){
   // an earlier generate) are never forgotten or double-counted.
   sessionRoundsHistory = [];
   sessionAppearances = getTodaysAppearanceCounts();
+  sessionCourtGenderCursor = 'M';
   const count = Math.max(1, sessionGameCount || 1);
   const schedule = [];
   for(let i = 0; i < count; i++){
@@ -1262,7 +1384,10 @@ function generateSchedule(){
     schedule.push(round);
   }
   if(schedule.length === 0){
-    showToast(sessionGenMode === 'singles' ? 'Need at least 2 players checked in' : 'Need at least 2 men and 2 ladies checked in');
+    const msg = sessionGenMode === 'singles' ? 'Need at least 2 players checked in'
+      : sessionGenMode === 'notMixed' ? 'Need at least 4 men or 4 ladies checked in'
+      : 'Need at least 2 men and 2 ladies checked in';
+    showToast(msg);
     return;
   }
   currentSchedule = schedule;
@@ -1278,6 +1403,8 @@ function renderNextGames(){
   const women = presentAll.filter(p => p.gender === 'F');
   const maxCourts = sessionGenMode === 'singles'
     ? Math.max(1, Math.floor(presentAll.length / 2) || 1)
+    : sessionGenMode === 'notMixed'
+    ? Math.max(1, Math.floor(men.length / 4) + Math.floor(women.length / 4) || 1)
     : Math.max(1, Math.min(Math.floor(men.length / 2), Math.floor(women.length / 2)) || 1);
   if(sessionCourts === null) sessionCourts = maxCourts;
   if(sessionGameCount === null) sessionGameCount = sessionCourts <= 1 ? 8 : 3;
@@ -1295,12 +1422,16 @@ function renderNextGames(){
     <div class="section-title">${sessionCourts <= 1 ? `Game ${ri+1}` : `Round ${ri+1}`}</div>
     ${round.courts.map((c, ci) => `
       <div class="court-card">
-        <div class="court-title"><span>${sessionCourts <= 1 ? 'Court' : `Court ${ci+1}`}</span><span class="quality">${qualityLabel(c.ratingDiff)}</span></div>
+        <div class="court-title"><span>${sessionCourts <= 1 ? 'Court' : `Court ${ci+1}`}${round.mode === 'notMixed' ? ` · ${c.gender === 'M' ? "Men's" : "Ladies'"}` : ''}</span><span class="quality">${qualityLabel(c.ratingDiff)}</span></div>
         <div class="court-match">
           ${round.mode === 'singles' ? `
             <div class="court-side">${escapeHtml(playerById(c.teamA[0])?.name || '—')}</div>
             <div class="court-vs">VS</div>
             <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB[0])?.name || '—')}</div>
+          ` : isArrayDoubles(round.mode) ? `
+            <div class="court-side">${escapeHtml(playerById(c.teamA[0])?.name || '—')} &amp; ${escapeHtml(playerById(c.teamA[1])?.name || '—')}</div>
+            <div class="court-vs">VS</div>
+            <div class="court-side" style="text-align:right">${escapeHtml(playerById(c.teamB[0])?.name || '—')} &amp; ${escapeHtml(playerById(c.teamB[1])?.name || '—')}</div>
           ` : `
             <div class="court-side">${escapeHtml(playerById(c.teamA.M)?.name || '—')} &amp; ${escapeHtml(playerById(c.teamA.F)?.name || '—')}</div>
             <div class="court-vs">VS</div>
@@ -1318,7 +1449,8 @@ function renderNextGames(){
 
   return `
     <div class="team-toggle" id="genModeToggle">
-      <button data-mode="mixed" class="${sessionGenMode==='mixed'?'active':''}">Mixed doubles</button>
+      <button data-mode="mixed" class="${sessionGenMode==='mixed'?'active':''}">Mixed</button>
+      <button data-mode="notMixed" class="${sessionGenMode==='notMixed'?'active':''}">Not mixed</button>
       <button data-mode="singles" class="${sessionGenMode==='singles'?'active':''}">Singles</button>
     </div>
     <div class="section-title">Who's here today?</div>
@@ -1552,7 +1684,12 @@ function renderAddMatch(){
       b: [{label: 'Men', options: optMen, selected: pre?.teamB?.M || null}, {label: 'Ladies', options: optWomen, selected: pre?.teamB?.F || null}]
     };
   } else {
-    teamSlots = { a: [{label: null, options: optAll, selected: null}, {label: null, options: optAll, selected: null}], b: [{label: null, options: optAll, selected: null}, {label: null, options: optAll, selected: null}] };
+    const preA = pre?.type === 'doubles' ? pre.teamA : null;
+    const preB = pre?.type === 'doubles' ? pre.teamB : null;
+    teamSlots = {
+      a: [{label: null, options: optAll, selected: preA?.[0] || null}, {label: null, options: optAll, selected: preA?.[1] || null}],
+      b: [{label: null, options: optAll, selected: preB?.[0] || null}, {label: null, options: optAll, selected: preB?.[1] || null}]
+    };
   }
 
   const renderSlot = (team, i, slot) => {
@@ -1840,6 +1977,9 @@ function bindMainEvents(){
       if(round.mode === 'singles'){
         matchPrefill = { type: 'singles', teamA: court.teamA, teamB: court.teamB };
         matchTeamSize = 'singles';
+      } else if(isArrayDoubles(round.mode)){
+        matchPrefill = { type: 'doubles', teamA: court.teamA, teamB: court.teamB };
+        matchTeamSize = 'doubles';
       } else {
         matchPrefill = { type: 'mixed', teamA: court.teamA, teamB: court.teamB };
         matchTeamSize = 'mixed';
