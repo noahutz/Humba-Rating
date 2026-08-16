@@ -528,6 +528,7 @@ let state = {
 };
 let view = 'leaderboard';
 let leaderboardMode = 'doubles'; // 'doubles' | 'singles' — DUPR tracks these separately
+let leaderboardScope = 'all'; // 'all' | 'today' — 'today' filters to players who played today and shows today's record/rating change
 let matchTeamSize = 'mixed'; // 'singles' | 'doubles' | 'mixed'
 let newPlayerGender = 'F';
 let matchPrefill = null; // {type:'mixed', teamA:{M,F}, teamB:{M,F}} or {type:'singles', teamA:[id], teamB:[id]} — pre-fill from generator
@@ -974,7 +975,11 @@ function renderLeaderboard(){
   }
   const field = ratingField(leaderboardMode);
   const mField = matchesField(leaderboardMode);
-  const sorted = [...state.players].sort((a, b) => {
+  const todaysStats = leaderboardScope === 'today' ? getTodaysFormatStats(leaderboardMode) : null;
+  const pool = leaderboardScope === 'today'
+    ? state.players.filter(p => todaysStats[p.id])
+    : state.players;
+  const sorted = [...pool].sort((a, b) => {
     const aRated = a[mField] > 0, bRated = b[mField] > 0;
     if(aRated !== bRated) return aRated ? -1 : 1; // rated players before NR
     if(!aRated) return a.name.localeCompare(b.name); // both NR — alphabetical
@@ -985,26 +990,34 @@ function renderLeaderboard(){
       <button data-mode="doubles" class="${leaderboardMode==='doubles'?'active':''}">Doubles</button>
       <button data-mode="singles" class="${leaderboardMode==='singles'?'active':''}">Singles</button>
     </div>
-    <div class="section-title">Ratings</div>
-  ` + sorted.map((p, i) => {
-    const matches = p[mField];
+    <div class="team-toggle" id="leaderboardScopeToggle">
+      <button data-scope="all" class="${leaderboardScope==='all'?'active':''}">All time</button>
+      <button data-scope="today" class="${leaderboardScope==='today'?'active':''}">Today</button>
+    </div>
+    <div class="section-title">${leaderboardScope==='today' ? "Today's games" : 'Ratings'}</div>
+  ` + (leaderboardScope === 'today' && sorted.length === 0
+    ? `<div class="player-record" style="padding:8px 4px;">No games logged today yet.</div>`
+    : sorted.map((p, i) => {
+    const today = todaysStats ? todaysStats[p.id] : null;
+    const matches = today ? today.matches : p[mField];
     const rated = matches > 0;
-    const reliability = Math.min(100, Math.round((matches / RELIABILITY_MATCHES) * 100));
-    const wins = leaderboardMode === 'singles' ? p.winsSingles : p.winsDoubles;
-    const losses = leaderboardMode === 'singles' ? p.lossesSingles : p.lossesDoubles;
+    const reliability = Math.min(100, Math.round((p[mField] / RELIABILITY_MATCHES) * 100));
+    const wins = today ? today.wins : (leaderboardMode === 'singles' ? p.winsSingles : p.winsDoubles);
+    const losses = today ? today.losses : (leaderboardMode === 'singles' ? p.lossesSingles : p.lossesDoubles);
+    const deltaShown = today ? today.delta : (p.lastDeltaFormat === field ? p.lastDelta : null);
     return `
     <div class="card">
       <div class="rank ${i===0?'gold':''}">${i+1}</div>
       <div class="player-info">
         <div class="player-name">${escapeHtml(p.name)} <span class="gender-tag ${p.gender==='F'?'tag-f':'tag-m'}">${p.gender==='F'?'Ladies':'Men'}</span></div>
-        <div class="player-record">${rated ? `<span class="record-w">${wins}W</span> · <span class="record-l">${losses}L</span>` : '<span class="record-w">0W</span> · <span class="record-l">0L</span>'} · ${matches} match${matches===1?'':'es'} · ${reliability}% reliable</div>
+        <div class="player-record">${rated ? `<span class="record-w">${wins}W</span> · <span class="record-l">${losses}L</span>` : '<span class="record-w">0W</span> · <span class="record-l">0L</span>'} · ${matches} ${today ? 'today' : (matches===1?'match':'matches')} · ${reliability}% reliable</div>
       </div>
       <div class="rating-block">
         <div class="rating-num">${rated ? p[field].toFixed(3) : 'NR'}</div>
-        ${p.lastDelta != null && p.lastDeltaFormat === field ? `<div class="rating-delta ${p.lastDelta>=0?'delta-up':'delta-down'}">${p.lastDelta>=0?'▲':'▼'} ${Math.abs(p.lastDelta).toFixed(3)}</div>` : ''}
+        ${deltaShown != null ? `<div class="rating-delta ${deltaShown>=0?'delta-up':'delta-down'}">${deltaShown>=0?'▲':'▼'} ${Math.abs(deltaShown).toFixed(3)}</div>` : ''}
       </div>
     </div>
-  `;}).join('');
+  `;}).join(''));
 }
 
 /* ---------- Players tab ---------- */
@@ -1077,6 +1090,33 @@ function getTodaysAppearanceCounts(){
     [...m.teamA, ...m.teamB].forEach(id => { counts[id] = (counts[id] || 0) + 1; });
   });
   return counts;
+}
+
+// Today's per-player record and net rating change, scoped to one format
+// (doubles = 'doubles'/'mixed' match types, singles = 'singles') — used by
+// the leaderboard's "Today" view. Rating itself stays cumulative; this is
+// just today's slice of it.
+function getTodaysFormatStats(mode){
+  const isDoublesMode = mode !== 'singles';
+  const stats = {};
+  state.matches.forEach(m => {
+    if(!isToday(m.date)) return;
+    if((m.type !== 'singles') !== isDoublesMode) return;
+    const aWon = m.scoreA > m.scoreB;
+    m.teamA.forEach(id => {
+      if(!stats[id]) stats[id] = { matches: 0, wins: 0, losses: 0, delta: 0 };
+      stats[id].matches++;
+      if(aWon) stats[id].wins++; else stats[id].losses++;
+      stats[id].delta += (m.deltaA || 0);
+    });
+    m.teamB.forEach(id => {
+      if(!stats[id]) stats[id] = { matches: 0, wins: 0, losses: 0, delta: 0 };
+      stats[id].matches++;
+      if(!aWon) stats[id].wins++; else stats[id].losses++;
+      stats[id].delta += (m.deltaB || 0);
+    });
+  });
+  return stats;
 }
 
 // Removes a court from the currently displayed Next-games schedule once it's
@@ -1870,6 +1910,13 @@ function bindMainEvents(){
   if(leaderboardModeToggle){
     leaderboardModeToggle.querySelectorAll('button').forEach(btn => {
       btn.onclick = () => { leaderboardMode = btn.dataset.mode; render(); };
+    });
+  }
+
+  const leaderboardScopeToggle = $('#leaderboardScopeToggle');
+  if(leaderboardScopeToggle){
+    leaderboardScopeToggle.querySelectorAll('button').forEach(btn => {
+      btn.onclick = () => { leaderboardScope = btn.dataset.scope; render(); };
     });
   }
 
