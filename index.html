@@ -170,6 +170,7 @@ main{padding: 20px;}
   object-fit: cover;
   border-radius: 10px;
   display: block;
+  cursor: pointer;
 }
 .news-article-body{
   font-size: 15px;
@@ -607,6 +608,7 @@ input:focus, select:focus, textarea:focus{
   max-height: 100%;
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  touch-action: pan-y;
 }
 .lightbox-close{
   position: fixed;
@@ -620,6 +622,34 @@ input:focus, select:focus, textarea:focus{
   font-size: 22px;
   line-height: 1;
   cursor: pointer;
+}
+.lightbox-nav{
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.15);
+  color: #FFFFFF;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 210;
+}
+.lightbox-prev{left: 12px;}
+.lightbox-next{right: 12px;}
+.lightbox-counter{
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #FFFFFF;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 12.5px;
+  background: rgba(0,0,0,0.4);
+  padding: 6px 14px;
+  border-radius: 100px;
 }
 @keyframes fadeIn{ from{opacity:0;} to{opacity:1;} }
 
@@ -663,6 +693,7 @@ let state = {
 let view = 'leaderboard';
 let newsViewingId = null; // id of the article currently open as a static page
 let newsDraftImages = []; // compressed base64 images attached to the article being composed, before publish
+let galleryItemSrcs = []; // ordered list of srcs currently shown on the Gallery tab, for lightbox swipe navigation
 let leaderboardMode = 'doubles'; // 'doubles' | 'singles' — DUPR tracks these separately
 let leaderboardScope = 'all'; // 'all' | 'today' — 'today' filters to players who played today and shows today's record/rating change
 let matchTeamSize = 'mixed'; // 'singles' | 'doubles' | 'mixed'
@@ -968,19 +999,65 @@ function showToast(msg){
   setTimeout(()=>{ t.remove(); }, 2200);
 }
 
-function openLightbox(src){
+let lightboxItems = [];
+let lightboxIndex = 0;
+
+// Builds the backdrop DOM once, on open. Stepping between photos only
+// mutates the existing <img> src and counter text — it never rebuilds the
+// backdrop element, so its fade-in animation doesn't retrigger and flash
+// on every swipe the way a full re-render would.
+function openLightbox(items, index){
+  lightboxItems = items;
+  lightboxIndex = index;
   const host = $('#lightboxHost');
+  const multi = lightboxItems.length > 1;
   host.innerHTML = `
     <div class="lightbox-backdrop" id="lightboxBackdrop">
-      <img src="${src}" class="lightbox-img">
+      ${multi ? `<button class="lightbox-nav lightbox-prev" id="lightboxPrev">‹</button>` : ''}
+      <img src="${lightboxItems[lightboxIndex]}" class="lightbox-img" id="lightboxImg">
+      ${multi ? `<button class="lightbox-nav lightbox-next" id="lightboxNext">›</button>` : ''}
       <button class="lightbox-close" id="lightboxClose">×</button>
+      ${multi ? `<div class="lightbox-counter" id="lightboxCounter">${lightboxIndex + 1} / ${lightboxItems.length}</div>` : ''}
     </div>
   `;
   $('#lightboxBackdrop').onclick = (e) => { if(e.target.id === 'lightboxBackdrop') closeLightbox(); };
   $('#lightboxClose').onclick = closeLightbox;
+  if(multi){
+    $('#lightboxPrev').onclick = (e) => { e.stopPropagation(); lightboxStep(-1); };
+    $('#lightboxNext').onclick = (e) => { e.stopPropagation(); lightboxStep(1); };
+  }
+
+  // Swipe support — a horizontal drag past the threshold steps to the
+  // next/previous photo; a short drag is treated as a tap (closes on backdrop).
+  const img = $('#lightboxImg');
+  let startX = null, startY = null, dragging = false;
+  img.addEventListener('touchstart', (e) => {
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    dragging = true;
+  }, { passive: true });
+  img.addEventListener('touchend', (e) => {
+    if(!dragging || startX === null) return;
+    dragging = false;
+    const endX = e.changedTouches[0].clientX;
+    const endY = e.changedTouches[0].clientY;
+    const dx = endX - startX, dy = endY - startY;
+    if(Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)){
+      lightboxStep(dx < 0 ? 1 : -1);
+    }
+  }, { passive: true });
+}
+function lightboxStep(delta){
+  if(lightboxItems.length <= 1) return;
+  lightboxIndex = (lightboxIndex + delta + lightboxItems.length) % lightboxItems.length;
+  const img = $('#lightboxImg');
+  if(img) img.src = lightboxItems[lightboxIndex];
+  const counter = $('#lightboxCounter');
+  if(counter) counter.textContent = `${lightboxIndex + 1} / ${lightboxItems.length}`;
 }
 function closeLightbox(){
   $('#lightboxHost').innerHTML = '';
+  lightboxItems = [];
 }
 
 function playerById(id){ return state.players.find(p => p.id === id); }
@@ -1194,7 +1271,7 @@ function renderNewsArticle(){
     <button class="btn btn-ghost" data-jump="news" style="width:auto; padding:8px 14px; margin-bottom:18px;">← Back to news</button>
     <div class="news-article-title">${escapeHtml(n.title)}</div>
     <div class="news-article-date">${d.toLocaleDateString(undefined, {month:'long', day:'numeric', year:'numeric'})}${n.author ? ` · by ${escapeHtml(n.author)}` : ''}</div>
-    ${images.length ? `<div class="article-images">${images.map(src => `<a href="${src}" target="_blank" rel="noopener"><img src="${src}"></a>`).join('')}</div>` : ''}
+    ${images.length ? `<div class="article-images">${images.map((src, i) => `<img src="${src}" data-preview-article-index="${i}">`).join('')}</div>` : ''}
     <div class="news-article-body">${escapeHtml(n.body)}</div>
     ${isAdmin ? `<button class="btn btn-ghost" data-delete-news="${n.id}">Delete article</button>` : ''}
   `;
@@ -1210,6 +1287,7 @@ function renderGallery(){
     items.push({ src: p.src, date: p.date, kind: 'standalone', photoId: p.id });
   });
   items.sort((a, b) => b.date - a.date);
+  galleryItemSrcs = items.map(it => it.src); // exposed for the lightbox click handler, so swipe can step through the same order shown
 
   const addBlock = isAdmin ? `
     <div class="field" style="margin-bottom:18px;">
@@ -1229,9 +1307,9 @@ function renderGallery(){
   return addBlock + `
     <div class="section-title">Photos (${items.length})</div>
     <div class="image-grid">
-      ${items.map(it => `
+      ${items.map((it, i) => `
         <div class="image-thumb-wrap">
-          <img src="${it.src}" class="image-thumb" data-preview-src="${it.src}">
+          <img src="${it.src}" class="image-thumb" data-preview-gallery-index="${i}">
           ${it.kind === 'standalone' && isAdmin ? `<button type="button" class="image-remove-btn" data-delete-gallery-photo="${it.photoId}">×</button>` : ''}
         </div>
       `).join('')}
@@ -2240,8 +2318,16 @@ function bindMainEvents(){
     };
   });
 
-  document.querySelectorAll('[data-preview-src]').forEach(img => {
-    img.onclick = () => openLightbox(img.dataset.previewSrc);
+  document.querySelectorAll('[data-preview-gallery-index]').forEach(img => {
+    img.onclick = () => openLightbox(galleryItemSrcs, parseInt(img.dataset.previewGalleryIndex, 10));
+  });
+
+  document.querySelectorAll('[data-preview-article-index]').forEach(img => {
+    img.onclick = () => {
+      const n = state.news.find(a => a.id === newsViewingId);
+      if(!n) return;
+      openLightbox(n.images || [], parseInt(img.dataset.previewArticleIndex, 10));
+    };
   });
 
   const galleryPhotoInput = $('#galleryPhotoInput');
