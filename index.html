@@ -115,6 +115,94 @@ main{padding: 20px;}
   gap: 14px;
   border: 1px solid rgba(47,82,51,0.06);
 }
+.news-card{
+  cursor: pointer;
+}
+.news-card-thumb{
+  width: 56px; height: 56px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.news-card-title{
+  font-weight: 700;
+  font-size: 15.5px;
+  margin-bottom: 4px;
+}
+.news-card-date{
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+.news-card-preview{
+  font-size: 13.5px;
+  color: var(--muted);
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.news-article-title{
+  font-weight: 700;
+  font-size: 21px;
+  line-height: 1.3;
+  margin-bottom: 6px;
+}
+.news-article-date{
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+.article-images{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.article-images img{
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  display: block;
+}
+.news-article-body{
+  font-size: 15px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  margin-bottom: 22px;
+}
+.image-grid{
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.image-thumb-wrap{
+  position: relative;
+}
+.image-thumb{
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 10px;
+  display: block;
+  cursor: pointer;
+}
+.image-remove-btn{
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0,0,0,0.62);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
 .rank{
   font-family: 'DM Mono', monospace;
   font-size: 13px;
@@ -187,7 +275,7 @@ main{padding: 20px;}
   color: var(--muted);
   margin-bottom: 7px;
 }
-input[type=text], input[type=number], select{
+input[type=text], input[type=number], select, textarea{
   width: 100%;
   background: var(--surface-2);
   border: 1px solid rgba(47,82,51,0.12);
@@ -197,7 +285,12 @@ input[type=text], input[type=number], select{
   font-size: 15px;
   font-family: 'Inter', sans-serif;
 }
-input:focus, select:focus{
+textarea{
+  resize: vertical;
+  min-height: 140px;
+  line-height: 1.5;
+}
+input:focus, select:focus, textarea:focus{
   outline: none;
   border-color: var(--ball);
 }
@@ -524,9 +617,12 @@ const RELIABILITY_MATCHES = 20; // matches to reach 100% reliability, per format
 let state = {
   players: [],   // {id, name, gender, rating, wins, losses, lastDelta}
   matches: [],   // {id, date, type, teamA:[ids], teamB:[ids], scoreA, scoreB, deltaA, deltaB}
+  news: [],      // {id, date, title, body}
   loaded: false
 };
 let view = 'leaderboard';
+let newsViewingId = null; // id of the article currently open as a static page
+let newsDraftImages = []; // compressed base64 images attached to the article being composed, before publish
 let leaderboardMode = 'doubles'; // 'doubles' | 'singles' — DUPR tracks these separately
 let leaderboardScope = 'all'; // 'all' | 'today' — 'today' filters to players who played today and shows today's record/rating change
 let matchTeamSize = 'mixed'; // 'singles' | 'doubles' | 'mixed'
@@ -567,6 +663,12 @@ function setAdmin(flag){
   isAdmin = flag;
   try{ localStorage.setItem(ADMIN_STORAGE_KEY, flag ? 'true' : 'false'); }catch(e){}
 }
+
+// Remembers the last name typed into the news "Author" field on this
+// device, so whoever's posting doesn't have to retype it every time.
+const NEWS_AUTHOR_STORAGE_KEY = 'humba-last-news-author';
+let lastNewsAuthor = '';
+try{ lastNewsAuthor = localStorage.getItem(NEWS_AUTHOR_STORAGE_KEY) || ''; }catch(e){ lastNewsAuthor = ''; }
 
 // Live-match viewer state — non-admin devices poll this while on the
 // Leaderboard tab so they can watch the score without controlling it.
@@ -742,12 +844,19 @@ function rowToMatch(r){
     ratable: r.ratable
   };
 }
+function newsToRow(n){
+  return { id: n.id, date: n.date, title: n.title, body: n.body, author: n.author || '', images: n.images || [] };
+}
+function rowToNews(r){
+  return { id: r.id, date: Number(r.date), title: r.title, body: r.body, author: r.author || '', images: r.images || [] };
+}
 
 async function loadData(){
   try{
-    const [playerRows, matchRows] = await Promise.all([supaSelect('players'), supaSelect('matches')]);
+    const [playerRows, matchRows, newsRows] = await Promise.all([supaSelect('players'), supaSelect('matches'), supaSelect('news')]);
     state.players = (playerRows || []).map(rowToPlayer);
     state.matches = (matchRows || []).map(rowToMatch);
+    state.news = (newsRows || []).map(rowToNews);
   }catch(e){
     showToast("Couldn't connect to the database");
   }
@@ -761,13 +870,14 @@ async function saveData(){
   try{
     await supaUpsert('players', state.players.map(playerToRow));
     await supaUpsert('matches', state.matches.map(matchToRow));
+    await supaUpsert('news', state.news.map(newsToRow));
   }catch(e){
     showToast("Couldn't save — try again");
   }
 }
 
 function exportData(){
-  const blob = new Blob([JSON.stringify({ players: state.players, matches: state.matches }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ players: state.players, matches: state.matches, news: state.news }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -789,6 +899,7 @@ async function importData(file){
     }
     state.players = parsed.players;
     state.matches = parsed.matches;
+    state.news = Array.isArray(parsed.news) ? parsed.news : [];
     recomputeRatings();
     await saveData();
     showToast('Data imported');
@@ -921,21 +1032,135 @@ async function deleteMatch(id){
   render();
 }
 
+async function deleteNewsArticle(id){
+  if(!confirm('Delete this article?')) return;
+  state.news = state.news.filter(n => n.id !== id);
+  try{
+    await supaDelete('news', id);
+  }catch(e){
+    showToast("Couldn't reach the database — try again");
+    return;
+  }
+  await saveData();
+  showToast('Article deleted');
+  newsViewingId = null;
+  view = 'news';
+  render();
+}
+
+/* ---------- News ---------- */
+function renderNews(){
+  const sorted = [...state.news].sort((a, b) => b.date - a.date);
+  const addBtn = isAdmin ? `<button class="btn btn-primary" data-jump="addNews" style="margin-bottom:16px;">+ Add article</button>` : '';
+  if(sorted.length === 0){
+    return addBtn + `
+      <div class="empty">
+        <div class="empty-title">No news yet</div>
+        <div>${isAdmin ? 'Post an update for the group.' : 'Check back for league updates.'}</div>
+      </div>
+    `;
+  }
+  return addBtn + sorted.map(n => {
+    const d = new Date(n.date);
+    const preview = n.body.length > 140 ? n.body.slice(0, 140) + '…' : n.body;
+    const thumb = (n.images && n.images[0]) ? `<img src="${n.images[0]}" class="news-card-thumb">` : '';
+    return `
+    <div class="card news-card" data-view-article="${n.id}">
+      ${thumb}
+      <div style="flex:1; min-width:0;">
+        <div class="news-card-title">${escapeHtml(n.title)}</div>
+        <div class="news-card-date">${d.toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'})}${n.author ? ` · ${escapeHtml(n.author)}` : ''}</div>
+        <div class="news-card-preview">${escapeHtml(preview)}</div>
+      </div>
+    </div>
+  `;}).join('');
+}
+
+function renderAddNews(){
+  return `
+    <div class="section-title">New article</div>
+    <div class="field">
+      <label>Title</label>
+      <input type="text" id="newsTitle" placeholder="e.g. Court closed this Saturday" maxlength="120">
+    </div>
+    <div class="field">
+      <label>Author</label>
+      <input type="text" id="newsAuthor" placeholder="Your name" maxlength="60" value="${escapeHtml(lastNewsAuthor)}">
+    </div>
+    <div class="field">
+      <label>Body</label>
+      <textarea id="newsBody" placeholder="Write the announcement…" maxlength="4000"></textarea>
+    </div>
+    <div class="field">
+      <label>Photos (optional)</label>
+      <input type="file" id="newsImageInput" accept="image/*" multiple>
+      ${newsDraftImages.length ? `<div class="image-grid" style="margin-top:10px;">${newsDraftImages.map((src, i) => `
+        <div class="image-thumb-wrap">
+          <img src="${src}" class="image-thumb">
+          <button type="button" class="image-remove-btn" data-remove-draft-image="${i}">×</button>
+        </div>
+      `).join('')}</div>` : ''}
+    </div>
+    <button class="btn btn-primary" id="publishNewsBtn">Publish</button>
+  `;
+}
+
+function renderNewsArticle(){
+  const n = state.news.find(a => a.id === newsViewingId);
+  if(!n){
+    return emptyState('Article not found', "It may have been removed.", 'news');
+  }
+  const d = new Date(n.date);
+  const images = n.images || [];
+  return `
+    <button class="btn btn-ghost" data-jump="news" style="width:auto; padding:8px 14px; margin-bottom:18px;">← Back to news</button>
+    <div class="news-article-title">${escapeHtml(n.title)}</div>
+    <div class="news-article-date">${d.toLocaleDateString(undefined, {month:'long', day:'numeric', year:'numeric'})}${n.author ? ` · by ${escapeHtml(n.author)}` : ''}</div>
+    ${images.length ? `<div class="article-images">${images.map(src => `<a href="${src}" target="_blank" rel="noopener"><img src="${src}"></a>`).join('')}</div>` : ''}
+    <div class="news-article-body">${escapeHtml(n.body)}</div>
+    ${isAdmin ? `<button class="btn btn-ghost" data-delete-news="${n.id}">Delete article</button>` : ''}
+  `;
+}
+
+/* ---------- Gallery ---------- */
+function renderGallery(){
+  const items = [];
+  [...state.news].sort((a, b) => b.date - a.date).forEach(n => {
+    (n.images || []).forEach(src => items.push({ src, articleId: n.id, title: n.title }));
+  });
+  if(items.length === 0){
+    return emptyState('No photos yet', 'Photos added to news articles will show up here.', 'news');
+  }
+  return `
+    <div class="section-title">Photos (${items.length})</div>
+    <div class="image-grid">
+      ${items.map(it => `
+        <div class="gallery-item" data-gallery-article="${it.articleId}" title="${escapeHtml(it.title)}">
+          <img src="${it.src}" class="image-thumb">
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
 /* ---------- Tabs ---------- */
 function renderTabs(){
   const tabs = [
     ['leaderboard', 'Leaderboard'],
+    ['news', 'News'],
+    ['gallery', 'Gallery'],
     ['nextGames', 'Next games'],
     ...(isAdmin ? [['liveScore', 'Live score']] : []),
     ['addMatch', 'Log match'],
     ['history', 'History'],
     ['players', 'Players']
   ];
+  const isNewsSubview = view === 'newsArticle' || view === 'addNews';
   $('#tabs').innerHTML = tabs.map(([key, label]) =>
-    `<button class="tab ${view===key?'active':''}" data-tab="${key}">${label}</button>`
+    `<button class="tab ${(view===key || (key==='news' && isNewsSubview))?'active':''}" data-tab="${key}">${label}</button>`
   ).join('');
   document.querySelectorAll('.tab').forEach(btn=>{
-    btn.onclick = () => { pendingCourtSource = null; view = btn.dataset.tab; render(); };
+    btn.onclick = () => { pendingCourtSource = null; newsViewingId = null; newsDraftImages = []; view = btn.dataset.tab; render(); };
   });
 }
 
@@ -1843,9 +2068,38 @@ function escapeHtml(str){
   return div.innerHTML;
 }
 
+// Downscales + re-encodes a picked photo before it's stored — phone photos
+// are often several MB, and these end up as base64 text in Postgres (no
+// separate storage bucket needed), so keeping each one modest matters.
+function compressImageFile(file, maxDim = 1400, quality = 0.82){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('read failed'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode failed'));
+      img.onload = () => {
+        let { width, height } = img;
+        if(width > maxDim || height > maxDim){
+          const scale = maxDim / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 /* ---------- Render root ---------- */
 function render(){
   if(view === 'liveScore' && !isAdmin) view = 'leaderboard'; // admin-only tab
+  if(view === 'addNews' && !isAdmin) view = 'news'; // admin-only sub-view
   if(view === 'leaderboard') startLiveViewerPolling(); else stopLiveViewerPolling();
 
   renderTabs();
@@ -1860,6 +2114,10 @@ function render(){
   else if(view === 'liveScore') m.innerHTML = renderLiveScore();
   else if(view === 'addMatch') m.innerHTML = renderAddMatch();
   else if(view === 'history') m.innerHTML = renderHistory();
+  else if(view === 'news') m.innerHTML = renderNews();
+  else if(view === 'addNews') m.innerHTML = renderAddNews();
+  else if(view === 'newsArticle') m.innerHTML = renderNewsArticle();
+  else if(view === 'gallery') m.innerHTML = renderGallery();
 
   bindMainEvents();
 }
@@ -1871,7 +2129,78 @@ function shareNote(){
 function bindMainEvents(){
   const jumpBtn = document.querySelector('[data-jump]');
   if(jumpBtn){
-    jumpBtn.onclick = () => { view = jumpBtn.dataset.jump; render(); };
+    jumpBtn.onclick = () => {
+      if(jumpBtn.dataset.jump === 'addNews') newsDraftImages = []; // fresh draft each time we enter the form
+      view = jumpBtn.dataset.jump;
+      render();
+    };
+  }
+
+  document.querySelectorAll('[data-view-article]').forEach(card => {
+    card.onclick = () => {
+      newsViewingId = card.dataset.viewArticle;
+      view = 'newsArticle';
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-gallery-article]').forEach(item => {
+    item.onclick = () => {
+      newsViewingId = item.dataset.galleryArticle;
+      view = 'newsArticle';
+      render();
+    };
+  });
+
+  const newsImageInput = $('#newsImageInput');
+  if(newsImageInput){
+    newsImageInput.onchange = async () => {
+      const files = Array.from(newsImageInput.files || []);
+      if(!files.length) return;
+      newsImageInput.disabled = true;
+      try{
+        const compressed = await Promise.all(files.map(f => compressImageFile(f)));
+        newsDraftImages.push(...compressed);
+      }catch(e){
+        showToast("Couldn't read one of those photos");
+      }
+      render();
+    };
+  }
+
+  document.querySelectorAll('[data-remove-draft-image]').forEach(btn => {
+    btn.onclick = () => {
+      newsDraftImages.splice(parseInt(btn.dataset.removeDraftImage, 10), 1);
+      render();
+    };
+  });
+
+  const publishNewsBtn = $('#publishNewsBtn');
+  if(publishNewsBtn){
+    publishNewsBtn.onclick = async () => {
+      const title = $('#newsTitle').value.trim();
+      const author = $('#newsAuthor').value.trim();
+      const body = $('#newsBody').value.trim();
+      if(!title || !body){
+        showToast('Add a title and body first');
+        return;
+      }
+      state.news.push({ id: uid(), date: Date.now(), title, author, body, images: newsDraftImages.slice() });
+      newsDraftImages = [];
+      lastNewsAuthor = author;
+      try{ localStorage.setItem(NEWS_AUTHOR_STORAGE_KEY, author); }catch(e){}
+      publishNewsBtn.disabled = true;
+      await saveData();
+      publishNewsBtn.disabled = false;
+      showToast('Article published');
+      view = 'news';
+      render();
+    };
+  }
+
+  const deleteNewsBtn = document.querySelector('[data-delete-news]');
+  if(deleteNewsBtn){
+    deleteNewsBtn.onclick = () => deleteNewsArticle(deleteNewsBtn.dataset.deleteNews);
   }
 
   const addPlayerBtn = $('#addPlayerBtn');
