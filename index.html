@@ -617,7 +617,8 @@ const RELIABILITY_MATCHES = 20; // matches to reach 100% reliability, per format
 let state = {
   players: [],   // {id, name, gender, rating, wins, losses, lastDelta}
   matches: [],   // {id, date, type, teamA:[ids], teamB:[ids], scoreA, scoreB, deltaA, deltaB}
-  news: [],      // {id, date, title, body}
+  news: [],      // {id, date, title, author, body, images}
+  galleryPhotos: [], // {id, date, src} — standalone photos added directly from the Gallery tab, not tied to an article
   loaded: false
 };
 let view = 'leaderboard';
@@ -850,13 +851,20 @@ function newsToRow(n){
 function rowToNews(r){
   return { id: r.id, date: Number(r.date), title: r.title, body: r.body, author: r.author || '', images: r.images || [] };
 }
+function galleryPhotoToRow(p){
+  return { id: p.id, date: p.date, src: p.src };
+}
+function rowToGalleryPhoto(r){
+  return { id: r.id, date: Number(r.date), src: r.src };
+}
 
 async function loadData(){
   try{
-    const [playerRows, matchRows, newsRows] = await Promise.all([supaSelect('players'), supaSelect('matches'), supaSelect('news')]);
+    const [playerRows, matchRows, newsRows, galleryRows] = await Promise.all([supaSelect('players'), supaSelect('matches'), supaSelect('news'), supaSelect('gallery_photos')]);
     state.players = (playerRows || []).map(rowToPlayer);
     state.matches = (matchRows || []).map(rowToMatch);
     state.news = (newsRows || []).map(rowToNews);
+    state.galleryPhotos = (galleryRows || []).map(rowToGalleryPhoto);
   }catch(e){
     showToast("Couldn't connect to the database");
   }
@@ -871,13 +879,14 @@ async function saveData(){
     await supaUpsert('players', state.players.map(playerToRow));
     await supaUpsert('matches', state.matches.map(matchToRow));
     await supaUpsert('news', state.news.map(newsToRow));
+    await supaUpsert('gallery_photos', state.galleryPhotos.map(galleryPhotoToRow));
   }catch(e){
     showToast("Couldn't save — try again");
   }
 }
 
 function exportData(){
-  const blob = new Blob([JSON.stringify({ players: state.players, matches: state.matches, news: state.news }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ players: state.players, matches: state.matches, news: state.news, galleryPhotos: state.galleryPhotos }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -900,6 +909,7 @@ async function importData(file){
     state.players = parsed.players;
     state.matches = parsed.matches;
     state.news = Array.isArray(parsed.news) ? parsed.news : [];
+    state.galleryPhotos = Array.isArray(parsed.galleryPhotos) ? parsed.galleryPhotos : [];
     recomputeRatings();
     await saveData();
     showToast('Data imported');
@@ -1048,6 +1058,20 @@ async function deleteNewsArticle(id){
   render();
 }
 
+async function deleteGalleryPhoto(id){
+  if(!confirm('Delete this photo?')) return;
+  state.galleryPhotos = state.galleryPhotos.filter(p => p.id !== id);
+  try{
+    await supaDelete('gallery_photos', id);
+  }catch(e){
+    showToast("Couldn't reach the database — try again");
+    return;
+  }
+  await saveData();
+  showToast('Photo deleted');
+  render();
+}
+
 /* ---------- News ---------- */
 function renderNews(){
   const sorted = [...state.news].sort((a, b) => b.date - a.date);
@@ -1125,18 +1149,40 @@ function renderNewsArticle(){
 /* ---------- Gallery ---------- */
 function renderGallery(){
   const items = [];
-  [...state.news].sort((a, b) => b.date - a.date).forEach(n => {
-    (n.images || []).forEach(src => items.push({ src, articleId: n.id, title: n.title }));
+  state.news.forEach(n => {
+    (n.images || []).forEach(src => items.push({ src, date: n.date, kind: 'article', articleId: n.id, title: n.title }));
   });
+  state.galleryPhotos.forEach(p => {
+    items.push({ src: p.src, date: p.date, kind: 'standalone', photoId: p.id });
+  });
+  items.sort((a, b) => b.date - a.date);
+
+  const addBlock = isAdmin ? `
+    <div class="field" style="margin-bottom:18px;">
+      <label>Add photos</label>
+      <input type="file" id="galleryPhotoInput" accept="image/*" multiple>
+    </div>
+  ` : '';
+
   if(items.length === 0){
-    return emptyState('No photos yet', 'Photos added to news articles will show up here.', 'news');
+    return addBlock + `
+      <div class="empty">
+        <div class="empty-title">No photos yet</div>
+        <div>${isAdmin ? 'Add one above, or attach photos when posting news.' : 'Check back later for photos.'}</div>
+      </div>
+    `;
   }
-  return `
+  return addBlock + `
     <div class="section-title">Photos (${items.length})</div>
     <div class="image-grid">
-      ${items.map(it => `
+      ${items.map(it => it.kind === 'article' ? `
         <div class="gallery-item" data-gallery-article="${it.articleId}" title="${escapeHtml(it.title)}">
           <img src="${it.src}" class="image-thumb">
+        </div>
+      ` : `
+        <div class="image-thumb-wrap">
+          <a href="${it.src}" target="_blank" rel="noopener"><img src="${it.src}" class="image-thumb"></a>
+          ${isAdmin ? `<button type="button" class="image-remove-btn" data-delete-gallery-photo="${it.photoId}">×</button>` : ''}
         </div>
       `).join('')}
     </div>
@@ -2150,6 +2196,28 @@ function bindMainEvents(){
       view = 'newsArticle';
       render();
     };
+  });
+
+  const galleryPhotoInput = $('#galleryPhotoInput');
+  if(galleryPhotoInput){
+    galleryPhotoInput.onchange = async () => {
+      const files = Array.from(galleryPhotoInput.files || []);
+      if(!files.length) return;
+      galleryPhotoInput.disabled = true;
+      try{
+        const compressed = await Promise.all(files.map(f => compressImageFile(f)));
+        compressed.forEach(src => state.galleryPhotos.push({ id: uid(), date: Date.now(), src }));
+        await saveData();
+        showToast(compressed.length > 1 ? 'Photos added' : 'Photo added');
+      }catch(e){
+        showToast("Couldn't read one of those photos");
+      }
+      render();
+    };
+  }
+
+  document.querySelectorAll('[data-delete-gallery-photo]').forEach(btn => {
+    btn.onclick = () => deleteGalleryPhoto(btn.dataset.deleteGalleryPhoto);
   });
 
   const newsImageInput = $('#newsImageInput');
